@@ -18,15 +18,12 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Download the repository to the GitHub runner
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 2. Install Microsoft Power Platform CLI tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Verify authentication to the Dev environment
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -35,11 +32,9 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
-      # 4. Create the temporary export directory
       - name: Create export folder
         run: mkdir -p out
 
-      # 5. Export the unmanaged solution from Dev
       - name: Export unmanaged solution from Dev
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -51,15 +46,12 @@ jobs:
           solution-output-file: out/${{ inputs.solution_name }}.zip
           managed: false
 
-      # 6. Remove old unpacked source so deleted files
-      #    are not accidentally retained in the workspace
       - name: Remove previous unpacked source
         shell: bash
         env:
           SOLUTION_NAME: ${{ inputs.solution_name }}
         run: rm -rf "solutions/${SOLUTION_NAME}"
 
-      # 7. Unpack the solution into source files
       - name: Unpack solution into source files
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
@@ -67,9 +59,7 @@ jobs:
           solution-folder: solutions/${{ inputs.solution_name }}
           solution-type: Unmanaged
           overwrite-files: true
-          process-canvas-apps: true
 
-      # 8. Check that source files were generated
       - name: Verify unpacked files
         shell: bash
         env:
@@ -90,7 +80,6 @@ jobs:
           echo "Generated source files:"
           find "$SOURCE_DIR" -type f | head -100
 
-      # 9. Commit source changes to GitHub
       - name: Commit source files
         shell: bash
         env:
