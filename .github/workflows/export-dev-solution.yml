@@ -1,0 +1,85 @@
+
+name: Export Dev Solution to GitHub
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "Solution unique name"
+        required: true
+        default: "EmployeeALMDemo"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  export-and-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      - name: Verify Dev connection
+        uses: microsoft/powerplatform-actions/who-am-i@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+
+      - name: Create export folder
+        run: mkdir -p out
+
+      - name: Export unmanaged solution from Dev
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-name: ${{ inputs.solution_name }}
+          solution-output-file: out/${{ inputs.solution_name }}.zip
+          managed: false
+
+      - name: Remove previous unpacked source
+        run: rm -rf "solutions/${{ inputs.solution_name }}"
+
+      - name: Unpack solution into source files
+        uses: microsoft/powerplatform-actions/unpack-solution@v1
+        with:
+          solution-file: out/${{ inputs.solution_name }}.zip
+          solution-folder: solutions/${{ inputs.solution_name }}
+          solution-type: Unmanaged
+          overwrite-files: true
+          process-canvas-apps: true
+
+      - name: Verify unpacked files
+        shell: bash
+        run: |
+          test -d "solutions/${{ inputs.solution_name }}"
+          echo "Unpacked source files:"
+          find "solutions/${{ inputs.solution_name }}" -type f | head -100
+
+      - name: Commit source files
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- "solutions/${SOLUTION_NAME}"
+
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Export ${SOLUTION_NAME} from Dev"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
