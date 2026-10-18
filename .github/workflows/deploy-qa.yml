@@ -1,54 +1,94 @@
 
-name: Deploy Managed Solution to QA
+name: Deploy to QA
 
 on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: "Optional: Build Managed Solution run ID. Leave blank for latest successful build."
+        description: 'Optional: GitHub Actions run ID that created the managed artifact'
         required: false
-        default: ""
         type: string
 
 permissions:
   contents: read
   actions: read
 
+env:
+  SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
+  ARTIFACT_NAME: ${{ vars.PP_SOLUTION_NAME }}-managed
+  SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
+
 jobs:
-  deploy-to-qa:
+  deploy-qa:
+    name: Import Managed Solution into QA
     runs-on: ubuntu-24.04
+    environment: QA
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Resolve build run ID
-        id: resolve_build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MANUAL_RUN_ID: ${{ inputs.build_run_id }}
-          REPO: ${{ github.repository }}
+      - name: Validate configuration
         shell: bash
+        env:
+          QA_URL: ${{ secrets.QA_ENVIRONMENT_URL }}
+          APP_ID: ${{ secrets.PP_APP_ID }}
+          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
         run: |
-          if [ -n "$MANUAL_RUN_ID" ]; then
-            RUN_ID="$MANUAL_RUN_ID"
+          set -euo pipefail
+
+          if [ -z "$SOLUTION_NAME" ]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is missing."
+            exit 1
+          fi
+
+          if [ -z "$QA_URL" ] || [ -z "$APP_ID" ] || \
+             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::One or more required GitHub secrets are missing."
+            exit 1
+          fi
+
+          if [ ! -f deployment-settings/qa.json ]; then
+            echo "::error::deployment-settings/qa.json not found."
+            exit 1
+          fi
+
+          python -m json.tool deployment-settings/qa.json > /dev/null
+
+      - name: Select managed solution build
+        id: select-build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_RUN_ID" ]; then
+            if [[ ! "$INPUT_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "::error::Build run ID must contain digits only."
+              exit 1
+            fi
+
+            RUN_ID="$INPUT_RUN_ID"
             echo "Using manually selected build run: $RUN_ID"
           else
             RUN_ID=$(gh run list \
-              --repo "$REPO" \
+              --repo "$GITHUB_REPOSITORY" \
               --workflow build-managed-solution.yml \
               --branch main \
               --status success \
               --limit 1 \
               --json databaseId \
-              --jq '.[0].databaseId')
+              --jq '.[0].databaseId // empty')
 
-            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-              echo "::error::No successful managed build found on main."
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::No successful managed-solution build found on main."
               exit 1
             fi
 
-            echo "Using latest successful managed build: $RUN_ID"
+            echo "Using latest successful build run: $RUN_ID"
           fi
 
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
@@ -56,28 +96,29 @@ jobs:
       - name: Download managed solution artifact
         uses: actions/download-artifact@v7
         with:
-          name: EmployeeALMDemo-managed
+          name: ${{ env.ARTIFACT_NAME }}
           path: out
-          run-id: ${{ steps.resolve_build.outputs.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.select-build.outputs.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Verify downloaded solution
+      - name: Verify managed solution ZIP
         shell: bash
         run: |
-          FILE="out/EmployeeALMDemo_managed.zip"
+          set -euo pipefail
 
-          if [ ! -s "$FILE" ]; then
-            echo "::error::Managed solution ZIP is missing or empty."
+          if [ ! -s "$SOLUTION_ZIP" ]; then
+            echo "::error::Expected managed solution ZIP not found: $SOLUTION_ZIP"
+            echo "Check the artifact name and selected build run."
             exit 1
           fi
 
-          echo "Managed solution artifact found:"
-          ls -lh "$FILE"
+          unzip -t "$SOLUTION_ZIP"
+          echo "Managed solution artifact verified."
 
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Verify QA connection
+      - name: Verify QA environment connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
           environment-url: ${{ secrets.QA_ENVIRONMENT_URL }}
@@ -92,7 +133,7 @@ jobs:
           app-id: ${{ secrets.PP_APP_ID }}
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-file: out/EmployeeALMDemo_managed.zip
+          solution-file: ${{ env.SOLUTION_ZIP }}
           use-deployment-settings-file: true
           deployment-settings-file: deployment-settings/qa.json
           publish-changes: true
