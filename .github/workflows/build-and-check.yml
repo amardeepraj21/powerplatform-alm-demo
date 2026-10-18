@@ -20,12 +20,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Power Platform Tools
-      # This must be before other Power Platform actions.
+      # 2. Install Power Platform tools
       - name: Install Power Platform Tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Validate solution source folder
+      # 3. Validate solution folder
       - name: Validate solution folder
         shell: bash
         run: |
@@ -65,7 +64,12 @@ jobs:
               print(f"Valid JSON: {file}")
           PY
 
-      # 5. Package solution from source control
+      # 5. Create output directory
+      - name: Prepare output directory
+        shell: bash
+        run: mkdir -p out
+
+      # 6. Pack solution
       - name: Pack Power Platform Solution
         uses: microsoft/powerplatform-actions/pack-solution@v1
         with:
@@ -73,7 +77,7 @@ jobs:
           solution-file: out/EmployeeALMDemo.zip
           solution-type: Unmanaged
 
-      # 6. Run Solution Checker
+      # 7. Run Power Platform Solution Checker
       - name: Run Power Platform Solution Checker
         uses: microsoft/powerplatform-actions/check-solution@v1
         with:
@@ -81,16 +85,16 @@ jobs:
           app-id: ${{ secrets.PP_APP_ID }}
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-file: out/EmployeeALMDemo.zip
+          path: out/EmployeeALMDemo.zip
+          geo: India
+          fail-on-analysis-error: true
+          checker-logs-artifact-name: solution-checker-logs
 
-      # 7. Upload reports for troubleshooting
+      # 8. Upload generated files for troubleshooting
       - name: Upload Solution Checker results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: power-platform-solution-checker-results
-          path: |
-            *.sarif
-            *.json
-            out/
+          path: out/
           if-no-files-found: warn
