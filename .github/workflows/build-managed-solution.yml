@@ -1,0 +1,60 @@
+
+name: Build Managed Solution
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "Solution unique name"
+        required: true
+        default: "EmployeeALMDemo"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-managed-solution:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      - name: Pack solution as managed
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: solutions/${{ inputs.solution_name }}
+          solution-file: out/${{ inputs.solution_name }}_managed.zip
+          solution-type: Managed
+
+      - name: Verify managed solution artifact
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+        run: |
+          FILE="out/${SOLUTION_NAME}_managed.zip"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Managed solution ZIP was not created."
+            exit 1
+          fi
+
+          if [ ! -s "$FILE" ]; then
+            echo "::error::Managed solution ZIP is empty."
+            exit 1
+          fi
+
+          echo "Managed solution artifact created:"
+          ls -lh "$FILE"
+
+      - name: Upload managed solution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EmployeeALMDemo-managed
+          path: out/${{ inputs.solution_name }}_managed.zip
+          if-no-files-found: error
+          retention-days: 30
