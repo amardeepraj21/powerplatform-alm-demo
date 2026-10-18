@@ -16,27 +16,41 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
       SOLUTION_FOLDER: solutions/EmployeeALMDemo
       SOLUTION_ZIP: out/EmployeeALMDemo.zip
 
     steps:
-      # 1. Download repository files
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # 2. Install PAC CLI
+      # 1. Install Power Platform CLI FIRST
       - name: Install Power Platform CLI
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Verify CLI installation
+      # 2. Diagnose PAC CLI installation
       - name: Verify PAC CLI
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Runner PATH:"
+          echo "$PATH"
+
+          if ! command -v pac >/dev/null 2>&1; then
+            echo "PAC CLI was not found on PATH."
+            echo "Searching common installation locations..."
+
+            find "$HOME" /usr/local/bin \
+              -type f -name pac -print 2>/dev/null || true
+
+            echo "::error::PAC CLI is not available after installation."
+            exit 1
+          fi
+
           pac help
 
-      # 4. Validate solution source folder
+      # 3. Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 4. Validate solution folder
       - name: Validate solution folder
         shell: bash
         run: |
@@ -48,14 +62,14 @@ jobs:
           fi
 
           if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
-            echo "::error::Other/Solution.xml not found."
-            echo "Check that the solution is unpacked correctly."
+            echo "::error::Solution.xml not found in Other/Solution.xml."
+            echo "Check the actual unpacked solution structure."
             exit 1
           fi
 
-          echo "Solution source folder exists."
+          echo "Solution folder validated."
 
-      # 5. Validate deployment settings JSON
+      # 5. Validate deployment settings
       - name: Validate deployment settings
         shell: bash
         run: |
@@ -65,22 +79,20 @@ jobs:
           import json
           from pathlib import Path
 
-          files = [
+          for path in (
               Path("deployment-settings/qa.json"),
               Path("deployment-settings/prod.json"),
-          ]
+          ):
+              if not path.is_file():
+                  raise SystemExit(f"Missing file: {path}")
 
-          for file in files:
-              if not file.is_file():
-                  raise SystemExit(f"Missing file: {file}")
+              with path.open(encoding="utf-8") as file:
+                  json.load(file)
 
-              with file.open(encoding="utf-8") as f:
-                  json.load(f)
-
-              print(f"Valid JSON: {file}")
+              print(f"Valid JSON: {path}")
           PY
 
-      # 6. Package solution
+      # 6. Package unmanaged solution
       - name: Pack Power Platform solution
         shell: bash
         run: |
@@ -93,14 +105,10 @@ jobs:
             --zipfile "$SOLUTION_ZIP" \
             --packagetype Unmanaged
 
-          if [ ! -s "$SOLUTION_ZIP" ]; then
-            echo "::error::Solution ZIP was not created."
-            exit 1
-          fi
+          test -s "$SOLUTION_ZIP"
+          echo "Solution package created."
 
-          echo "Solution packaged successfully."
-
-      # 7. Authenticate PAC CLI using the Dev environment
+      # 7. Authenticate to Dev
       - name: Authenticate PAC CLI
         shell: bash
         env:
@@ -124,7 +132,7 @@ jobs:
 
           pac org who
 
-      # 8. Run Power Apps Solution Checker
+      # 8. Run Solution Checker
       - name: Run Power Platform Solution Checker
         shell: bash
         run: |
@@ -137,7 +145,7 @@ jobs:
             --outputDirectory out/checker-results \
             --geo India
 
-      # 9. Save checker results for inspection
+      # 9. Upload checker reports even when a later step fails
       - name: Upload Solution Checker results
         if: always()
         uses: actions/upload-artifact@v4
