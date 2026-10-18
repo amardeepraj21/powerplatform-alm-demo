@@ -62,7 +62,7 @@ jobs:
           ls -lh "$FILE"
 
       - name: Upload managed solution artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: EmployeeALMDemo-managed
           path: out/${{ inputs.solution_name }}_managed.zip
