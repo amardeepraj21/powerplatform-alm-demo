@@ -1,0 +1,15 @@
+{
+  "EnvironmentVariables": [
+    {
+      "SchemaName": "ald_ExternalApiUrl",
+      "Value": "https://prod-api.example.com"
+    }
+  ],
+  "ConnectionReferences": [
+    {
+      "LogicalName": "ald_EmployeeDataverseConnection",
+      "ConnectionId": "",
+      "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
+    }
+  ]
+}
