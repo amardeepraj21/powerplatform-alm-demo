@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: "Successful Build Managed Solution workflow run ID"
-        required: true
-        default: "39100283548"
+        description: "Optional: Build Managed Solution run ID. Leave blank for latest successful build."
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -22,15 +22,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install Power Platform tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
+      - name: Resolve build run ID
+        id: resolve_build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MANUAL_RUN_ID: ${{ inputs.build_run_id }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if [ -n "$MANUAL_RUN_ID" ]; then
+            RUN_ID="$MANUAL_RUN_ID"
+            echo "Using manually selected build run: $RUN_ID"
+          else
+            RUN_ID=$(gh run list \
+              --repo "$REPO" \
+              --workflow build-managed-solution.yml \
+              --branch main \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              echo "::error::No successful managed build found on main."
+              exit 1
+            fi
+
+            echo "Using latest successful managed build: $RUN_ID"
+          fi
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download managed solution artifact
         uses: actions/download-artifact@v5
         with:
           name: EmployeeALMDemo-managed
           path: out
-          run-id: ${{ inputs.build_run_id }}
+          run-id: ${{ steps.resolve_build.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify downloaded solution
@@ -43,8 +71,11 @@ jobs:
             exit 1
           fi
 
-          echo "Managed solution ZIP found:"
+          echo "Managed solution artifact found:"
           ls -lh "$FILE"
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
 
       - name: Verify QA connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
