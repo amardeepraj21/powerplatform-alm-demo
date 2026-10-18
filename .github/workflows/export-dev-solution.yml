@@ -1,46 +1,31 @@
 
-name: Export Dev Solution to GitHub
+name: Export Dev Solution
 
 on:
   workflow_dispatch:
-    inputs:
-      solution_name:
-        description: "Solution unique name"
-        required: true
-        default: "EmployeeALMDemo"
-        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/export-dev-solution.yml"
 
 permissions:
   contents: write
 
-# Prevent two runs from changing the Dev version simultaneously.
-concurrency:
-  group: export-dev-solution-${{ inputs.solution_name }}
-  cancel-in-progress: false
-
 jobs:
-  export-and-commit:
+  export-dev-solution:
     runs-on: ubuntu-24.04
 
     steps:
+      # 1. Get repository files
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "10.0.x"
+      # 2. Required before using any Power Platform Action
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Install PAC CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-
-          "$HOME/.dotnet/tools/pac" help
-
+      # 3. Verify the Dev environment connection
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -49,185 +34,115 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
+      # 4. Create a PAC CLI authentication profile for Dev
       - name: Authenticate PAC CLI to Dev
         shell: bash
         env:
-          PP_APP_ID: ${{ secrets.PP_APP_ID }}
-          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
-          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          APP_ID: ${{ secrets.PP_APP_ID }}
+          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
         run: |
           set -euo pipefail
 
           pac auth create \
-            --name Dev \
-            --applicationId "$PP_APP_ID" \
-            --clientSecret "$PP_CLIENT_SECRET" \
-            --tenant "$PP_TENANT_ID" \
-            --environment "$DEV_ENVIRONMENT_URL"
+            --name "Dev-SP" \
+            --environment "$DEV_URL" \
+            --applicationId "$APP_ID" \
+            --clientSecret "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
 
-      - name: Read current solution version
-        id: current_version
+          pac auth select --name "Dev-SP"
+
+      # 5. Read the current online solution version
+      - name: Get current solution version
+        id: version
         shell: bash
         env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
         run: |
           set -euo pipefail
 
-          if ! OUTPUT=$(pac solution online-version \
-            --solution-name "$SOLUTION_NAME" \
-            --environment "$DEV_ENVIRONMENT_URL" 2>&1); then
-            echo "$OUTPUT"
-            echo "::error::Unable to read the current solution version."
-            exit 1
-          fi
+          OUTPUT=$(pac solution online-version \
+            --solution-name "EmployeeALMDemo" \
+            --environment "$DEV_URL")
 
           echo "$OUTPUT"
 
           CURRENT_VERSION=$(printf '%s\n' "$OUTPUT" |
             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
-            tail -n 1 || true)
+            head -n 1 || true)
 
           if [ -z "$CURRENT_VERSION" ]; then
-            echo "::error::Could not parse the current solution version."
+            echo "::error::Could not determine the current solution version."
             exit 1
           fi
 
           echo "Current version: $CURRENT_VERSION"
-          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Increment solution revision in Dev
-        id: version
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          CURRENT_VERSION: ${{ steps.current_version.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          IFS='.' read -r MAJOR MINOR BUILD REVISION \
-            <<< "$CURRENT_VERSION"
+          IFS='.' read -r MAJOR MINOR BUILD REVISION <<< "$CURRENT_VERSION"
 
           NEW_REVISION=$((REVISION + 1))
-          NEW_VERSION="${MAJOR}.${MINOR}.${BUILD}.${NEW_REVISION}"
+          NEW_VERSION="$MAJOR.$MINOR.$BUILD.$NEW_REVISION"
 
-          echo "Updating solution version:"
-          echo "$CURRENT_VERSION -> $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "New version: $NEW_VERSION"
+
+      # 6. Update the solution version in Dataverse
+      - name: Increment online solution version
+        shell: bash
+        env:
+          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euo pipefail
 
           pac solution online-version \
-            --solution-name "$SOLUTION_NAME" \
+            --solution-name "EmployeeALMDemo" \
             --solution-version "$NEW_VERSION" \
-            --environment "$DEV_ENVIRONMENT_URL"
+            --environment "$DEV_URL"
 
-          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Solution version updated to $NEW_VERSION"
 
-      - name: Verify updated solution version
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
+      # 7. Export the unmanaged solution from Dev
+      - name: Export unmanaged solution
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-name: EmployeeALMDemo
+          solution-output-file: EmployeeALMDemo.zip
+          managed: false
+          overwrite: true
+          run-asynchronously: true
+          max-async-wait-time: 60
 
-          if ! OUTPUT=$(pac solution online-version \
-            --solution-name "$SOLUTION_NAME" \
-            --environment "$DEV_ENVIRONMENT_URL" 2>&1); then
-            echo "$OUTPUT"
-            echo "::error::Unable to verify the updated version."
-            exit 1
-          fi
-
-          echo "$OUTPUT"
-
-          if ! printf '%s\n' "$OUTPUT" |
-            grep -Fq "$EXPECTED_VERSION"; then
-            echo "::error::Expected version $EXPECTED_VERSION was not confirmed."
-            exit 1
-          fi
-
-          echo "Verified version: $EXPECTED_VERSION"
-
-      - name: Create export folder
-        run: mkdir -p out
-
-      - name: Export unmanaged solution from Dev
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-        run: |
-          set -euo pipefail
-
-          pac solution export \
-            --path "out/${SOLUTION_NAME}.zip" \
-            --name "$SOLUTION_NAME" \
-            --environment "$DEV_ENVIRONMENT_URL" \
-            --include general
-
-          if [ ! -s "out/${SOLUTION_NAME}.zip" ]; then
-            echo "::error::Unmanaged solution ZIP was not created."
-            exit 1
-          fi
-
-      - name: Remove previous unpacked source
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-        run: |
-          rm -rf "solutions/${SOLUTION_NAME}"
-
-      - name: Unpack solution into source files
+      # 8. Unpack the ZIP into source-control-friendly files
+      - name: Unpack solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: out/${{ inputs.solution_name }}.zip
-          solution-folder: solutions/${{ inputs.solution_name }}
+          solution-file: EmployeeALMDemo.zip
+          solution-folder: solutions/EmployeeALMDemo
           solution-type: Unmanaged
           overwrite-files: true
 
-      - name: Verify unpacked files
+      # 9. Commit the unpacked solution back to GitHub
+      - name: Commit solution changes
         shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-        run: |
-          set -euo pipefail
-
-          SOURCE_DIR="solutions/${SOLUTION_NAME}"
-
-          if [ ! -d "$SOURCE_DIR" ]; then
-            echo "::error::Solution source directory was not created."
-            exit 1
-          fi
-
-          if [ -z "$(find "$SOURCE_DIR" -type f -print -quit)" ]; then
-            echo "::error::No source files were generated."
-            exit 1
-          fi
-
-          echo "Generated source files:"
-          find "$SOURCE_DIR" -type f | head -100
-
-      - name: Commit source files
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ inputs.solution_name }}
-          NEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A -- "solutions/${SOLUTION_NAME}"
+          git add solutions/EmployeeALMDemo
 
           if git diff --cached --quiet; then
-            echo "No source changes to commit."
-            echo "Dev version is now ${NEW_VERSION}."
-            exit 0
+            echo "No unpacked solution changes to commit."
+          else
+            git commit -m "Export EmployeeALMDemo from Dev"
+            git push
           fi
-
-          git commit -m "Export ${SOLUTION_NAME} v${NEW_VERSION} from Dev"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
