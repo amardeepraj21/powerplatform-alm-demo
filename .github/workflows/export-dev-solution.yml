@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
+
 jobs:
   export-dev-solution:
     runs-on: ubuntu-24.04
@@ -26,7 +29,7 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      # 4. Install standalone PAC CLI for shell commands
+      # 4. Install standalone PAC CLI
       - name: Install PAC CLI
         shell: bash
         run: |
@@ -68,19 +71,23 @@ jobs:
 
           pac auth select --name "Dev-SP"
 
-          pac auth list
-
-      # 7. Read the current solution version
+      # 7. Validate solution name and read current version
       - name: Get current solution version
         id: version
         shell: bash
         env:
           DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
         run: |
           set -euo pipefail
 
+          if [ -z "$SOLUTION_NAME" ]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            exit 1
+          fi
+
           OUTPUT=$(pac solution online-version \
-            --solution-name "EmployeeALMDemo" \
+            --solution-name "$SOLUTION_NAME" \
             --environment "$DEV_URL")
 
           echo "$OUTPUT"
@@ -91,7 +98,6 @@ jobs:
 
           if [ -z "$CURRENT_VERSION" ]; then
             echo "::error::Could not determine the current solution version."
-            echo "::error::Review the PAC CLI output above."
             exit 1
           fi
 
@@ -110,18 +116,19 @@ jobs:
         shell: bash
         env:
           DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           set -euo pipefail
 
           pac solution online-version \
-            --solution-name "EmployeeALMDemo" \
+            --solution-name "$SOLUTION_NAME" \
             --solution-version "$NEW_VERSION" \
             --environment "$DEV_URL"
 
-          echo "Updated EmployeeALMDemo to version $NEW_VERSION"
+          echo "Updated $SOLUTION_NAME to version $NEW_VERSION"
 
-      # 9. Export unmanaged solution using Power Platform Actions
+      # 9. Export unmanaged solution
       - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -129,8 +136,8 @@ jobs:
           app-id: ${{ secrets.PP_APP_ID }}
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-name: EmployeeALMDemo
-          solution-output-file: EmployeeALMDemo.zip
+          solution-name: ${{ env.SOLUTION_NAME }}
+          solution-output-file: ${{ env.SOLUTION_NAME }}.zip
           managed: false
           overwrite: true
           run-asynchronously: true
@@ -140,14 +147,16 @@ jobs:
       - name: Unpack solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: EmployeeALMDemo.zip
-          solution-folder: solutions/EmployeeALMDemo
+          solution-file: ${{ env.SOLUTION_NAME }}.zip
+          solution-folder: solutions/${{ env.SOLUTION_NAME }}
           solution-type: Unmanaged
           overwrite-files: true
 
       # 11. Commit unpacked solution to GitHub
       - name: Commit solution changes
         shell: bash
+        env:
+          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
         run: |
           set -euo pipefail
 
@@ -155,11 +164,11 @@ jobs:
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add solutions/EmployeeALMDemo
+          git add "solutions/$SOLUTION_NAME"
 
           if git diff --cached --quiet; then
             echo "No unpacked solution changes to commit."
           else
-            git commit -m "Export EmployeeALMDemo from Dev"
+            git commit -m "Export $SOLUTION_NAME from Dev"
             git push
           fi
