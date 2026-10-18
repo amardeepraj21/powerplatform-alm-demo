@@ -21,8 +21,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install Power Platform tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install PAC CLI
+        shell: bash
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/tools/pac" --version
 
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
@@ -40,15 +49,19 @@ jobs:
           PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
           DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
         run: |
+          set -euo pipefail
+
           pac auth create \
             --name Dev \
             --applicationId "$PP_APP_ID" \
             --clientSecret "$PP_CLIENT_SECRET" \
             --tenant "$PP_TENANT_ID" \
-            --url "$DEV_ENVIRONMENT_URL"
+            --environment "$DEV_ENVIRONMENT_URL"
 
-      - name: Increment solution version in Dev
-        id: version
+          pac auth list
+
+      - name: Read current solution version
+        id: current_version
         shell: bash
         env:
           SOLUTION_NAME: ${{ inputs.solution_name }}
@@ -60,7 +73,7 @@ jobs:
             --solution-name "$SOLUTION_NAME" \
             --environment "$DEV_ENVIRONMENT_URL" 2>&1) || {
               echo "$OUTPUT"
-              echo "::error::Could not read the current solution version."
+              echo "::error::Unable to read the solution version."
               exit 1
             }
 
@@ -68,12 +81,25 @@ jobs:
 
           CURRENT_VERSION=$(printf '%s\n' "$OUTPUT" |
             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
-            tail -n 1)
+            tail -n 1 || true)
 
           if [ -z "$CURRENT_VERSION" ]; then
-            echo "::error::Could not parse the current four-part version."
+            echo "::error::Could not identify the current solution version from PAC CLI output."
             exit 1
           fi
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Increment solution revision in Dev
+        id: version
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          CURRENT_VERSION: ${{ steps.current_version.outputs.version }}
+        run: |
+          set -euo pipefail
 
           IFS='.' read -r MAJOR MINOR BUILD REVISION \
             <<< "$CURRENT_VERSION"
@@ -81,8 +107,7 @@ jobs:
           NEW_REVISION=$((REVISION + 1))
           NEW_VERSION="${MAJOR}.${MINOR}.${BUILD}.${NEW_REVISION}"
 
-          echo "Current version: $CURRENT_VERSION"
-          echo "New version: $NEW_VERSION"
+          echo "Updating Dev from $CURRENT_VERSION to $NEW_VERSION"
 
           pac solution online-version \
             --solution-name "$SOLUTION_NAME" \
@@ -90,6 +115,29 @@ jobs:
             --environment "$DEV_ENVIRONMENT_URL"
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify updated solution version
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          OUTPUT=$(pac solution online-version \
+            --solution-name "$SOLUTION_NAME" \
+            --environment "$DEV_ENVIRONMENT_URL" 2>&1)
+
+          echo "$OUTPUT"
+
+          if ! printf '%s\n' "$OUTPUT" |
+            grep -Fq "$EXPECTED_VERSION"; then
+              echo "::error::Dev solution version does not match the expected version $EXPECTED_VERSION."
+              exit 1
+          fi
+
+          echo "Verified Dev solution version: $EXPECTED_VERSION"
 
       - name: Create export folder
         run: mkdir -p out
@@ -109,7 +157,8 @@ jobs:
         shell: bash
         env:
           SOLUTION_NAME: ${{ inputs.solution_name }}
-        run: rm -rf "solutions/${SOLUTION_NAME}"
+        run: |
+          rm -rf "solutions/${SOLUTION_NAME}"
 
       - name: Unpack solution into source files
         uses: microsoft/powerplatform-actions/unpack-solution@v1
@@ -156,7 +205,7 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "No source changes to commit."
-            echo "Dev version is now ${NEW_VERSION}."
+            echo "Dev solution version is now ${NEW_VERSION}."
             exit 0
           fi
 
