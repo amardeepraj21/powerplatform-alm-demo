@@ -15,61 +15,32 @@ jobs:
     name: Validate Power Platform Solution
     runs-on: ubuntu-latest
 
-    env:
-      SOLUTION_FOLDER: solutions/EmployeeALMDemo
-      SOLUTION_ZIP: out/EmployeeALMDemo.zip
-
     steps:
-      # 1. Install Power Platform CLI FIRST
-      - name: Install Power Platform CLI
-        uses: microsoft/powerplatform-actions/actions-install@v1
-
-      # 2. Diagnose PAC CLI installation
-      - name: Verify PAC CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Runner PATH:"
-          echo "$PATH"
-
-          if ! command -v pac >/dev/null 2>&1; then
-            echo "PAC CLI was not found on PATH."
-            echo "Searching common installation locations..."
-
-            find "$HOME" /usr/local/bin \
-              -type f -name pac -print 2>/dev/null || true
-
-            echo "::error::PAC CLI is not available after installation."
-            exit 1
-          fi
-
-          pac help
-
-      # 3. Checkout repository
+      # 1. Checkout source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 4. Validate solution folder
+      # 2. Install Power Platform Tools
+      # This must be before other Power Platform actions.
+      - name: Install Power Platform Tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      # 3. Validate solution source folder
       - name: Validate solution folder
         shell: bash
         run: |
           set -euo pipefail
+
+          SOLUTION_FOLDER="solutions/EmployeeALMDemo"
 
           if [ ! -d "$SOLUTION_FOLDER" ]; then
             echo "::error::Solution folder not found: $SOLUTION_FOLDER"
             exit 1
           fi
 
-          if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
-            echo "::error::Solution.xml not found in Other/Solution.xml."
-            echo "Check the actual unpacked solution structure."
-            exit 1
-          fi
+          echo "Solution source folder found."
 
-          echo "Solution folder validated."
-
-      # 5. Validate deployment settings
+      # 4. Validate deployment settings JSON
       - name: Validate deployment settings
         shell: bash
         run: |
@@ -79,77 +50,47 @@ jobs:
           import json
           from pathlib import Path
 
-          for path in (
+          files = [
               Path("deployment-settings/qa.json"),
               Path("deployment-settings/prod.json"),
-          ):
-              if not path.is_file():
-                  raise SystemExit(f"Missing file: {path}")
+          ]
 
-              with path.open(encoding="utf-8") as file:
-                  json.load(file)
+          for file in files:
+              if not file.is_file():
+                  raise SystemExit(f"Missing file: {file}")
 
-              print(f"Valid JSON: {path}")
+              with file.open(encoding="utf-8") as stream:
+                  json.load(stream)
+
+              print(f"Valid JSON: {file}")
           PY
 
-      # 6. Package unmanaged solution
-      - name: Pack Power Platform solution
-        shell: bash
-        run: |
-          set -euo pipefail
+      # 5. Package solution from source control
+      - name: Pack Power Platform Solution
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: solutions/EmployeeALMDemo
+          solution-file: out/EmployeeALMDemo.zip
+          solution-type: Unmanaged
 
-          mkdir -p out
-
-          pac solution pack \
-            --folder "$SOLUTION_FOLDER" \
-            --zipfile "$SOLUTION_ZIP" \
-            --packagetype Unmanaged
-
-          test -s "$SOLUTION_ZIP"
-          echo "Solution package created."
-
-      # 7. Authenticate to Dev
-      - name: Authenticate PAC CLI
-        shell: bash
-        env:
-          PP_APP_ID: ${{ secrets.PP_APP_ID }}
-          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
-          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-        run: |
-          set -euo pipefail
-
-          : "${PP_APP_ID:?Missing PP_APP_ID secret}"
-          : "${PP_TENANT_ID:?Missing PP_TENANT_ID secret}"
-          : "${PP_CLIENT_SECRET:?Missing PP_CLIENT_SECRET secret}"
-          : "${DEV_ENVIRONMENT_URL:?Missing DEV_ENVIRONMENT_URL secret}"
-
-          pac auth create \
-            --environment "$DEV_ENVIRONMENT_URL" \
-            --applicationId "$PP_APP_ID" \
-            --clientSecret "$PP_CLIENT_SECRET" \
-            --tenant "$PP_TENANT_ID"
-
-          pac org who
-
-      # 8. Run Solution Checker
+      # 6. Run Solution Checker
       - name: Run Power Platform Solution Checker
-        shell: bash
-        run: |
-          set -euo pipefail
+        uses: microsoft/powerplatform-actions/check-solution@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-file: out/EmployeeALMDemo.zip
 
-          mkdir -p out/checker-results
-
-          pac solution check \
-            --path "$SOLUTION_ZIP" \
-            --outputDirectory out/checker-results \
-            --geo India
-
-      # 9. Upload checker reports even when a later step fails
+      # 7. Upload reports for troubleshooting
       - name: Upload Solution Checker results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: power-platform-solution-checker-results
-          path: out/checker-results/
+          path: |
+            *.sarif
+            *.json
+            out/
           if-no-files-found: warn
