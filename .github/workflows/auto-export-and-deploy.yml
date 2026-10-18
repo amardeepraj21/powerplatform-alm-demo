@@ -1,0 +1,248 @@
+
+name: Export And Deploy
+
+run-name: Export EmployeeALMDemo from Dev and deploy to ${{ inputs.target_environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Select the target environment"
+        type: choice
+        required: true
+        default: qa
+        options:
+          - qa
+          - prod
+
+      version_part_to_update:
+        description: "Version component to increment (major.minor.build.revision)"
+        type: choice
+        required: true
+        default: revision
+        options:
+          - major
+          - minor
+          - build
+          - revision
+
+permissions:
+  contents: write
+
+concurrency:
+  group: employee-alm-export-deploy
+  cancel-in-progress: false
+
+jobs:
+  export-and-deploy:
+    name: Export, version, and deploy solution
+    runs-on: ubuntu-24.04
+
+    # Configure GitHub Environments named "qa" and "prod".
+    # Add required reviewers to "prod" in repository settings.
+    environment:
+      name: ${{ inputs.target_environment }}
+
+    env:
+      SOLUTION_NAME: EmployeeALMDemo
+      DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+      TARGET_URL: ${{ inputs.target_environment == 'qa' && secrets.QA_ENVIRONMENT_URL || secrets.PROD_ENVIRONMENT_URL }}
+      PP_APP_ID: ${{ secrets.PP_APP_ID }}
+      PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+      VERSION_PART: ${{ inputs.version_part_to_update }}
+      SOURCE_FOLDER: solutions/EmployeeALMDemo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install or update PAC CLI
+        shell: bash
+        run: |
+          if ! dotnet tool update --global Microsoft.PowerApps.CLI.Tool; then
+            dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          fi
+
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/tools/pac" help
+
+      - name: Authenticate to Dev
+        shell: bash
+        run: |
+          pac auth create \
+            --name "Dev-SP" \
+            --url "$DEV_URL" \
+            --applicationId "$PP_APP_ID" \
+            --clientSecret "$PP_CLIENT_SECRET" \
+            --tenant "$PP_TENANT_ID"
+
+          pac auth select --name "Dev-SP"
+          pac solution list --environment "$DEV_URL"
+
+      - name: Read and increment solution version
+        id: versioning
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_VERSION="$(
+            pac solution online-version \
+              --solution-name "$SOLUTION_NAME" \
+              --environment "$DEV_URL" |
+            grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
+            head -n 1
+          )"
+
+          if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read the current solution version."
+            exit 1
+          fi
+
+          IFS='.' read -r MAJOR MINOR BUILD REVISION <<< "$CURRENT_VERSION"
+
+          case "$VERSION_PART" in
+            major) REVISION_PART=0; MAJOR=$((MAJOR + 1)) ;;
+            minor) MINOR=$((MINOR + 1)) ;;
+            build) BUILD=$((BUILD + 1)) ;;
+            revision) REVISION=$((REVISION + 1)) ;;
+            *) echo "Invalid version component: $VERSION_PART"; exit 1 ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${BUILD}.${REVISION}"
+          VERSION_UNDERSCORES="${MAJOR}_${MINOR}_${BUILD}_${REVISION}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "New version: $NEW_VERSION"
+
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_underscores=$VERSION_UNDERSCORES" >> "$GITHUB_OUTPUT"
+
+      - name: Update online solution version
+        shell: bash
+        run: |
+          pac solution online-version \
+            --solution-name "$SOLUTION_NAME" \
+            --solution-version "${{ steps.versioning.outputs.new_version }}" \
+            --environment "$DEV_URL"
+
+      - name: Export unmanaged solution
+        shell: bash
+        run: |
+          pac solution export \
+            --path "${SOLUTION_NAME}_${{ steps.versioning.outputs.version_underscores }}_unmanaged.zip" \
+            --name "$SOLUTION_NAME" \
+            --include general
+
+      - name: Export managed solution
+        shell: bash
+        run: |
+          pac solution export \
+            --path "${SOLUTION_NAME}_${{ steps.versioning.outputs.version_underscores }}_managed.zip" \
+            --name "$SOLUTION_NAME" \
+            --managed \
+            --include general
+
+      - name: Verify exported ZIP files
+        shell: bash
+        run: |
+          test -s "${SOLUTION_NAME}_${{ steps.versioning.outputs.version_underscores }}_unmanaged.zip"
+          test -s "${SOLUTION_NAME}_${{ steps.versioning.outputs.version_underscores }}_managed.zip"
+          ls -lh "${SOLUTION_NAME}_${{ steps.versioning.outputs.version_underscores }}"*.zip
+
+      - name: Unpack unmanaged solution
+        uses: microsoft/powerplatform-actions/unpack-solution@v1
+        with:
+          solution-file: ${{ env.SOLUTION_NAME }}_${{ steps.versioning.outputs.version_underscores }}_unmanaged.zip
+          solution-folder: ${{ env.SOURCE_FOLDER }}
+          solution-type: Unmanaged
+          overwrite-files: true
+
+      - name: Commit unpacked solution to GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$SOURCE_FOLDER"
+
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+          else
+            git commit -m "chore: export ${SOLUTION_NAME} version ${{ steps.versioning.outputs.new_version }}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Publish unmanaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: EmployeeALMDemo-${{ steps.versioning.outputs.version_underscores }}-unmanaged
+          path: EmployeeALMDemo_${{ steps.versioning.outputs.version_underscores }}_unmanaged.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish managed artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: EmployeeALMDemo-${{ steps.versioning.outputs.version_underscores }}-managed
+          path: EmployeeALMDemo_${{ steps.versioning.outputs.version_underscores }}_managed.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Select target deployment settings
+        id: settings
+        shell: bash
+        run: |
+          if [[ "$GITHUB_ENV" == "" ]]; then
+            echo "GitHub environment is not available."
+            exit 1
+          fi
+
+          if [[ "${{ inputs.target_environment }}" == "qa" ]]; then
+            echo "settings_file=deployment-settings/qa.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "settings_file=deployment-settings/prod.json" >> "$GITHUB_OUTPUT"
+          fi
+
+          test -f "${{ inputs.target_environment == 'qa' && 'deployment-settings/qa.json' || 'deployment-settings/prod.json' }}"
+
+      - name: Verify target URL is configured
+        shell: bash
+        run: |
+          if [[ -z "$TARGET_URL" ]]; then
+            echo "The target environment URL is empty."
+            exit 1
+          fi
+
+      - name: Import managed solution to target
+        uses: microsoft/powerplatform-actions/import-solution@v1
+        with:
+          environment-url: ${{ env.TARGET_URL }}
+          app-id: ${{ env.PP_APP_ID }}
+          client-secret: ${{ env.PP_CLIENT_SECRET }}
+          tenant-id: ${{ env.PP_TENANT_ID }}
+          solution-file: EmployeeALMDemo_${{ steps.versioning.outputs.version_underscores }}_managed.zip
+          use-deployment-settings-file: true
+          deployment-settings-file: ${{ steps.settings.outputs.settings_file }}
+          publish-changes: true
+          run-asynchronously: true
+          max-async-wait-time: 60
+
+      - name: Show deployment summary
+        shell: bash
+        run: |
+          echo "Solution: $SOLUTION_NAME"
+          echo "Source: Dev"
+          echo "Target: ${{ inputs.target_environment }}"
+          echo "Previous version: ${{ steps.versioning.outputs.current_version }}"
+          echo "Deployed version: ${{ steps.versioning.outputs.new_version }}"
