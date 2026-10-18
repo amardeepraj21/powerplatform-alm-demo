@@ -1,0 +1,145 @@
+
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'Build run ID of the managed ZIP that passed QA testing'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
+  ARTIFACT_NAME: ${{ vars.PP_SOLUTION_NAME }}-managed
+  SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
+
+jobs:
+  deploy-prod:
+    name: Deploy Managed Solution to Production
+    runs-on: ubuntu-24.04
+
+    # GitHub pauses this job until Production approval is granted.
+    environment:
+      name: Production
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate configuration
+        shell: bash
+        env:
+          PROD_URL: ${{ secrets.PROD_ENVIRONMENT_URL }}
+          APP_ID: ${{ secrets.PP_APP_ID }}
+          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SOLUTION_NAME" ]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is missing."
+            exit 1
+          fi
+
+          if [[ ! "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Enter a valid numeric build run ID."
+            exit 1
+          fi
+
+          if [ -z "$PROD_URL" ] || [ -z "$APP_ID" ] || \
+             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::One or more required GitHub secrets are missing."
+            exit 1
+          fi
+
+          if [ ! -f deployment-settings/prod.json ]; then
+            echo "::error::deployment-settings/prod.json not found."
+            exit 1
+          fi
+
+          python -m json.tool deployment-settings/prod.json > /dev/null
+
+      - name: Verify selected build run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+
+          RUN_INFO=$(gh run view "$BUILD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json workflowName,conclusion,headBranch)
+
+          WORKFLOW_NAME=$(echo "$RUN_INFO" | jq -r '.workflowName')
+          CONCLUSION=$(echo "$RUN_INFO" | jq -r '.conclusion')
+          BRANCH=$(echo "$RUN_INFO" | jq -r '.headBranch')
+
+          if [ "$WORKFLOW_NAME" != "Build Managed Solution" ]; then
+            echo "::error::The selected run is not the managed-solution build workflow."
+            exit 1
+          fi
+
+          if [ "$CONCLUSION" != "success" ] || [ "$BRANCH" != "main" ]; then
+            echo "::error::The build must have succeeded on main."
+            exit 1
+          fi
+
+          echo "Verified successful managed-solution build: $BUILD_RUN_ID"
+
+      - name: Download the exact managed artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: out
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify managed solution ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$SOLUTION_ZIP" ]; then
+            echo "::error::Managed solution ZIP not found: $SOLUTION_ZIP"
+            exit 1
+          fi
+
+          unzip -t "$SOLUTION_ZIP"
+          echo "Managed solution ZIP integrity verified."
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      - name: Verify Production environment connection
+        uses: microsoft/powerplatform-actions/who-am-i@v1
+        with:
+          environment-url: ${{ secrets.PROD_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+
+      - name: Import managed solution into Production
+        uses: microsoft/powerplatform-actions/import-solution@v1
+        with:
+          environment-url: ${{ secrets.PROD_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-file: ${{ env.SOLUTION_ZIP }}
+          use-deployment-settings-file: true
+          deployment-settings-file: deployment-settings/prod.json
+          publish-changes: true
+          run-asynchronously: true
+          max-async-wait-time: 60
