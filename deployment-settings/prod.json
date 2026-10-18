@@ -8,7 +8,7 @@
   "ConnectionReferences": [
     {
       "LogicalName": "ald_EmployeeDataverseConnection",
-      "ConnectionId": "",
+      "ConnectionId": "shared-commondataser-124fc72f-7c87-4b7b-a7d2-c94af4de5ee7",
       "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
     }
   ]
