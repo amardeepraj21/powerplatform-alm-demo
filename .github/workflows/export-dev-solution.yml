@@ -13,6 +13,11 @@ on:
 permissions:
   contents: write
 
+# Prevent two runs from changing the Dev version simultaneously.
+concurrency:
+  group: export-dev-solution-${{ inputs.solution_name }}
+  cancel-in-progress: false
+
 jobs:
   export-and-commit:
     runs-on: ubuntu-24.04
@@ -21,17 +26,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install .NET
+      - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: "10.0.x"
 
       - name: Install PAC CLI
         shell: bash
         run: |
+          set -euo pipefail
+
           dotnet tool install --global Microsoft.PowerApps.CLI.Tool
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-          "$HOME/.dotnet/tools/pac" --version
+
+          "$HOME/.dotnet/tools/pac" help
 
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
@@ -58,8 +66,6 @@ jobs:
             --tenant "$PP_TENANT_ID" \
             --environment "$DEV_ENVIRONMENT_URL"
 
-          pac auth list
-
       - name: Read current solution version
         id: current_version
         shell: bash
@@ -69,13 +75,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          OUTPUT=$(pac solution online-version \
+          if ! OUTPUT=$(pac solution online-version \
             --solution-name "$SOLUTION_NAME" \
-            --environment "$DEV_ENVIRONMENT_URL" 2>&1) || {
-              echo "$OUTPUT"
-              echo "::error::Unable to read the solution version."
-              exit 1
-            }
+            --environment "$DEV_ENVIRONMENT_URL" 2>&1); then
+            echo "$OUTPUT"
+            echo "::error::Unable to read the current solution version."
+            exit 1
+          fi
 
           echo "$OUTPUT"
 
@@ -84,7 +90,7 @@ jobs:
             tail -n 1 || true)
 
           if [ -z "$CURRENT_VERSION" ]; then
-            echo "::error::Could not identify the current solution version from PAC CLI output."
+            echo "::error::Could not parse the current solution version."
             exit 1
           fi
 
@@ -107,7 +113,8 @@ jobs:
           NEW_REVISION=$((REVISION + 1))
           NEW_VERSION="${MAJOR}.${MINOR}.${BUILD}.${NEW_REVISION}"
 
-          echo "Updating Dev from $CURRENT_VERSION to $NEW_VERSION"
+          echo "Updating solution version:"
+          echo "$CURRENT_VERSION -> $NEW_VERSION"
 
           pac solution online-version \
             --solution-name "$SOLUTION_NAME" \
@@ -125,33 +132,45 @@ jobs:
         run: |
           set -euo pipefail
 
-          OUTPUT=$(pac solution online-version \
+          if ! OUTPUT=$(pac solution online-version \
             --solution-name "$SOLUTION_NAME" \
-            --environment "$DEV_ENVIRONMENT_URL" 2>&1)
+            --environment "$DEV_ENVIRONMENT_URL" 2>&1); then
+            echo "$OUTPUT"
+            echo "::error::Unable to verify the updated version."
+            exit 1
+          fi
 
           echo "$OUTPUT"
 
           if ! printf '%s\n' "$OUTPUT" |
             grep -Fq "$EXPECTED_VERSION"; then
-              echo "::error::Dev solution version does not match the expected version $EXPECTED_VERSION."
-              exit 1
+            echo "::error::Expected version $EXPECTED_VERSION was not confirmed."
+            exit 1
           fi
 
-          echo "Verified Dev solution version: $EXPECTED_VERSION"
+          echo "Verified version: $EXPECTED_VERSION"
 
       - name: Create export folder
         run: mkdir -p out
 
       - name: Export unmanaged solution from Dev
-        uses: microsoft/powerplatform-actions/export-solution@v1
-        with:
-          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          app-id: ${{ secrets.PP_APP_ID }}
-          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-name: ${{ inputs.solution_name }}
-          solution-output-file: out/${{ inputs.solution_name }}.zip
-          managed: false
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+        run: |
+          set -euo pipefail
+
+          pac solution export \
+            --path "out/${SOLUTION_NAME}.zip" \
+            --name "$SOLUTION_NAME" \
+            --environment "$DEV_ENVIRONMENT_URL" \
+            --include general
+
+          if [ ! -s "out/${SOLUTION_NAME}.zip" ]; then
+            echo "::error::Unmanaged solution ZIP was not created."
+            exit 1
+          fi
 
       - name: Remove previous unpacked source
         shell: bash
@@ -174,6 +193,7 @@ jobs:
           SOLUTION_NAME: ${{ inputs.solution_name }}
         run: |
           set -euo pipefail
+
           SOURCE_DIR="solutions/${SOLUTION_NAME}"
 
           if [ ! -d "$SOURCE_DIR" ]; then
@@ -205,7 +225,7 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "No source changes to commit."
-            echo "Dev solution version is now ${NEW_VERSION}."
+            echo "Dev version is now ${NEW_VERSION}."
             exit 0
           fi
 
