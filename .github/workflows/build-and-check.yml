@@ -5,10 +5,7 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'solutions/**'
-      - 'deployment-settings/**'
-      - '.github/workflows/build-and-check.yml'
+
   workflow_dispatch:
 
 permissions:
@@ -25,11 +22,9 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Download repository source
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 2. Validate repository variable and solution source
       - name: Validate solution source
         shell: bash
         run: |
@@ -54,7 +49,6 @@ jobs:
           echo "Solution: $SOLUTION_NAME"
           echo "Source folder: $SOLUTION_FOLDER"
 
-      # 3. Validate QA and Production deployment settings
       - name: Validate deployment settings JSON
         shell: bash
         run: |
@@ -65,16 +59,13 @@ jobs:
 
           echo "Both deployment settings files contain valid JSON."
 
-      # 4. Install Power Platform tooling
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 5. Create output directory
       - name: Create output folder
         shell: bash
         run: mkdir -p out
 
-      # 6. Package the unmanaged solution
       - name: Pack unmanaged solution
         uses: microsoft/powerplatform-actions/pack-solution@v1
         with:
@@ -82,7 +73,6 @@ jobs:
           solution-file: ${{ env.SOLUTION_ZIP }}
           solution-type: Unmanaged
 
-      # 7. Verify the generated ZIP
       - name: Verify solution ZIP
         shell: bash
         run: |
@@ -94,10 +84,8 @@ jobs:
           fi
 
           unzip -t "$SOLUTION_ZIP"
-
           echo "Solution package created and ZIP integrity verified."
 
-      # 8. Run Microsoft Power Platform Solution Checker
       - name: Run Power Platform Solution Checker
         uses: microsoft/powerplatform-actions/check-solution@v1
         with:
