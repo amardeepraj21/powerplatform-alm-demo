@@ -81,7 +81,6 @@ jobs:
           solution-folder: ${{ env.SOLUTION_FOLDER }}
           solution-file: ${{ env.SOLUTION_ZIP }}
           solution-type: Unmanaged
-          overwrite-files: true
 
       # 7. Verify the generated ZIP
       - name: Verify solution ZIP
