@@ -1,0 +1,111 @@
+
+name: Build and Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'solutions/**'
+      - 'deployment-settings/**'
+      - '.github/workflows/build-and-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
+  SOLUTION_FOLDER: solutions/${{ vars.PP_SOLUTION_NAME }}
+  SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_unmanaged.zip
+
+jobs:
+  build-and-check:
+    name: Validate Power Platform Solution
+    runs-on: ubuntu-24.04
+
+    steps:
+      # 1. Download repository source
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # 2. Validate repository variable and solution source
+      - name: Validate solution source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SOLUTION_NAME" ]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            exit 1
+          fi
+
+          if [ ! -d "$SOLUTION_FOLDER" ]; then
+            echo "::error::Solution folder not found: $SOLUTION_FOLDER"
+            exit 1
+          fi
+
+          if ! find "$SOLUTION_FOLDER" -type f \
+            -iname 'solution.xml' -print -quit | grep -q .; then
+            echo "::error::Solution.xml not found in $SOLUTION_FOLDER"
+            exit 1
+          fi
+
+          echo "Solution: $SOLUTION_NAME"
+          echo "Source folder: $SOLUTION_FOLDER"
+
+      # 3. Validate QA and Production deployment settings
+      - name: Validate deployment settings JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m json.tool deployment-settings/qa.json > /dev/null
+          python -m json.tool deployment-settings/prod.json > /dev/null
+
+          echo "Both deployment settings files contain valid JSON."
+
+      # 4. Install Power Platform tooling
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      # 5. Create output directory
+      - name: Create output folder
+        shell: bash
+        run: mkdir -p out
+
+      # 6. Package the unmanaged solution
+      - name: Pack unmanaged solution
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: ${{ env.SOLUTION_FOLDER }}
+          solution-file: ${{ env.SOLUTION_ZIP }}
+          solution-type: Unmanaged
+          overwrite-files: true
+
+      # 7. Verify the generated ZIP
+      - name: Verify solution ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$SOLUTION_ZIP" ]; then
+            echo "::error::Solution ZIP was not created."
+            exit 1
+          fi
+
+          unzip -t "$SOLUTION_ZIP"
+
+          echo "Solution package created and ZIP integrity verified."
+
+      # 8. Run Microsoft Power Platform Solution Checker
+      - name: Run Power Platform Solution Checker
+        uses: microsoft/powerplatform-actions/check-solution@v1
+        with:
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          path: ${{ env.SOLUTION_ZIP }}
+          geo: India
+          fail-on-analysis-error: true
+          checker-logs-artifact-name: ${{ env.SOLUTION_NAME }}-Checker-Logs
