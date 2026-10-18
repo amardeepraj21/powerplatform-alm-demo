@@ -1,0 +1,69 @@
+
+name: Deploy Managed Solution to QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Successful Build Managed Solution workflow run ID"
+        required: true
+        default: "39100283548"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deploy-to-qa:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Power Platform tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      - name: Download managed solution artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: EmployeeALMDemo-managed
+          path: out
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify downloaded solution
+        shell: bash
+        run: |
+          FILE="out/EmployeeALMDemo_managed.zip"
+
+          if [ ! -s "$FILE" ]; then
+            echo "::error::Managed solution ZIP is missing or empty."
+            exit 1
+          fi
+
+          echo "Managed solution ZIP found:"
+          ls -lh "$FILE"
+
+      - name: Verify QA connection
+        uses: microsoft/powerplatform-actions/who-am-i@v1
+        with:
+          environment-url: ${{ secrets.QA_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+
+      - name: Import managed solution into QA
+        uses: microsoft/powerplatform-actions/import-solution@v1
+        with:
+          environment-url: ${{ secrets.QA_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-file: out/EmployeeALMDemo_managed.zip
+          use-deployment-settings-file: true
+          deployment-settings-file: deployment-settings/qa.json
+          publish-changes: true
+          run-asynchronously: true
+          max-async-wait-time: 60
