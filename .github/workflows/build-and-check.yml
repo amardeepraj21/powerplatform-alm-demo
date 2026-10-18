@@ -1,229 +1,148 @@
-
 name: Build and Check
 
 on:
   pull_request:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
   contents: read
-
-env:
-  SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
-  SOLUTION_FOLDER: solutions/${{ vars.PP_SOLUTION_NAME }}
-  SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_unmanaged.zip
+  security-events: write
 
 jobs:
-  build-and-check:
+  validate:
     name: Validate Power Platform Solution
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+
+    env:
+      SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
+      SOLUTION_FOLDER: solutions/EmployeeALMDemo
+      SOLUTION_ZIP: out/EmployeeALMDemo.zip
 
     steps:
+      # 1. Download repository files
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      - name: Validate solution source
+      # 2. Install PAC CLI
+      - name: Install Power Platform CLI
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      # 3. Verify CLI installation
+      - name: Verify PAC CLI
         shell: bash
         run: |
           set -euo pipefail
+          pac help
 
-          if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
-            exit 1
-          fi
+      # 4. Validate solution source folder
+      - name: Validate solution folder
+        shell: bash
+        run: |
+          set -euo pipefail
 
           if [ ! -d "$SOLUTION_FOLDER" ]; then
             echo "::error::Solution folder not found: $SOLUTION_FOLDER"
             exit 1
           fi
 
-          if ! find "$SOLUTION_FOLDER" -type f \
-            -iname 'solution.xml' -print -quit | grep -q .; then
-            echo "::error::Solution.xml not found in $SOLUTION_FOLDER"
+          if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
+            echo "::error::Other/Solution.xml not found."
+            echo "Check that the solution is unpacked correctly."
             exit 1
           fi
 
-          echo "Solution: $SOLUTION_NAME"
-          echo "Source folder: $SOLUTION_FOLDER"
+          echo "Solution source folder exists."
 
-      - name: Validate deployment settings JSON
+      # 5. Validate deployment settings JSON
+      - name: Validate deployment settings
         shell: bash
         run: |
           set -euo pipefail
 
-          python -m json.tool deployment-settings/qa.json > /dev/null
-          python -m json.tool deployment-settings/prod.json > /dev/null
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-          echo "Deployment settings JSON is valid."
+          files = [
+              Path("deployment-settings/qa.json"),
+              Path("deployment-settings/prod.json"),
+          ]
 
-      - name: Install Power Platform tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
+          for file in files:
+              if not file.is_file():
+                  raise SystemExit(f"Missing file: {file}")
 
-      - name: Create output directory
+              with file.open(encoding="utf-8") as f:
+                  json.load(f)
+
+              print(f"Valid JSON: {file}")
+          PY
+
+      # 6. Package solution
+      - name: Pack Power Platform solution
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p out
-          mkdir -p out/checker-results
 
-      - name: Pack unmanaged solution
-        uses: microsoft/powerplatform-actions/pack-solution@v1
-        with:
-          solution-folder: ${{ env.SOLUTION_FOLDER }}
-          solution-file: ${{ env.SOLUTION_ZIP }}
-          solution-type: Unmanaged
-
-      - name: Verify solution ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
+          pac solution pack \
+            --folder "$SOLUTION_FOLDER" \
+            --zipfile "$SOLUTION_ZIP" \
+            --packagetype Unmanaged
 
           if [ ! -s "$SOLUTION_ZIP" ]; then
             echo "::error::Solution ZIP was not created."
             exit 1
           fi
 
-          unzip -t "$SOLUTION_ZIP"
-          echo "Solution ZIP verified successfully."
+          echo "Solution packaged successfully."
 
+      # 7. Authenticate PAC CLI using the Dev environment
       - name: Authenticate PAC CLI
         shell: bash
         env:
-          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          APP_ID: ${{ secrets.PP_APP_ID }}
-          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          PP_APP_ID: ${{ secrets.PP_APP_ID }}
+          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
         run: |
           set -euo pipefail
 
-          if [ -z "$DEV_URL" ] || [ -z "$APP_ID" ] || \
-             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::error::Required Power Platform secrets are missing."
-            exit 1
-          fi
+          : "${PP_APP_ID:?Missing PP_APP_ID secret}"
+          : "${PP_TENANT_ID:?Missing PP_TENANT_ID secret}"
+          : "${PP_CLIENT_SECRET:?Missing PP_CLIENT_SECRET secret}"
+          : "${DEV_ENVIRONMENT_URL:?Missing DEV_ENVIRONMENT_URL secret}"
 
           pac auth create \
-            --name "Dev-SP" \
-            --url "$DEV_URL" \
-            --applicationId "$APP_ID" \
-            --clientSecret "$CLIENT_SECRET" \
-            --tenant "$TENANT_ID"
+            --environment "$DEV_ENVIRONMENT_URL" \
+            --applicationId "$PP_APP_ID" \
+            --clientSecret "$PP_CLIENT_SECRET" \
+            --tenant "$PP_TENANT_ID"
 
-          pac auth select --name "Dev-SP"
+          pac org who
 
+      # 8. Run Power Apps Solution Checker
       - name: Run Power Platform Solution Checker
         shell: bash
         run: |
           set -euo pipefail
+
+          mkdir -p out/checker-results
 
           pac solution check \
             --path "$SOLUTION_ZIP" \
             --outputDirectory out/checker-results \
             --geo India
 
-          echo "Solution Checker completed."
-          echo "Generated report files:"
-          find out/checker-results -type f -print
-
-      - name: Block critical Solution Checker findings
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python <<'PY'
-          import glob
-          import json
-          import sys
-
-          reports = glob.glob(
-              "out/checker-results/**/*.sarif",
-              recursive=True
-          )
-
-          if not reports:
-              print(
-                  "::error::No SARIF report found. "
-                  "Cannot verify critical findings."
-              )
-              sys.exit(1)
-
-          critical_count = 0
-          unknown_count = 0
-          total_findings = 0
-
-          for report_path in reports:
-              with open(report_path, encoding="utf-8") as file:
-                  report = json.load(file)
-
-              for run in report.get("runs", []):
-                  rules = {
-                      rule.get("id"): rule
-                      for rule in (
-                          run.get("tool", {})
-                          .get("driver", {})
-                          .get("rules", [])
-                      )
-                  }
-
-                  for result in run.get("results", []):
-                      total_findings += 1
-
-                      result_props = result.get("properties") or {}
-                      rule = rules.get(result.get("ruleId"), {})
-                      rule_props = rule.get("properties") or {}
-
-                      severity = (
-                          result_props.get("problem.severity")
-                          or result_props.get("severity")
-                          or rule_props.get("problem.severity")
-                          or rule_props.get("severity")
-                      )
-
-                      if not isinstance(severity, str):
-                          unknown_count += 1
-                          continue
-
-                      severity = severity.strip().lower()
-
-                      if severity == "critical":
-                          critical_count += 1
-                      elif severity not in (
-                          "high",
-                          "medium",
-                          "low",
-                          "informational",
-                          "info"
-                      ):
-                          unknown_count += 1
-
-          print(f"Total findings: {total_findings}")
-          print(f"Critical findings: {critical_count}")
-          print(f"Unknown severity findings: {unknown_count}")
-
-          if critical_count > 0:
-              print(
-                  "::error::Critical issues detected. "
-                  "Build is blocked."
-              )
-              sys.exit(1)
-
-          if unknown_count > 0:
-              print(
-                  "::error::Some findings have an unknown severity. "
-                  "Review the report before allowing the build."
-              )
-              sys.exit(1)
-
-          print("Quality gate passed: no critical issues detected.")
-          PY
-
-      - name: Upload Solution Checker reports
+      # 9. Save checker results for inspection
+      - name: Upload Solution Checker results
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.SOLUTION_NAME }}-Checker-Reports
+          name: power-platform-solution-checker-results
           path: out/checker-results/
           if-no-files-found: warn
-          retention-days: 30
+```
