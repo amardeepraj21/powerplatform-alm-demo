@@ -3,11 +3,6 @@ name: Export Dev Solution
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/export-dev-solution.yml"
 
 permissions:
   contents: write
@@ -17,15 +12,34 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Get repository files
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 2. Required before using any Power Platform Action
+      # 2. Required for Microsoft Power Platform Actions
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Verify the Dev environment connection
+      # 3. Install the .NET SDK required by current PAC CLI
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      # 4. Install standalone PAC CLI for shell commands
+      - name: Install PAC CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet tool update --global Microsoft.PowerApps.CLI.Tool \
+            || dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+          "$HOME/.dotnet/tools/pac" help
+
+      # 5. Verify service principal access to Dev
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -34,7 +48,7 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
-      # 4. Create a PAC CLI authentication profile for Dev
+      # 6. Authenticate standalone PAC CLI to Dev
       - name: Authenticate PAC CLI to Dev
         shell: bash
         env:
@@ -47,14 +61,16 @@ jobs:
 
           pac auth create \
             --name "Dev-SP" \
-            --environment "$DEV_URL" \
+            --url "$DEV_URL" \
             --applicationId "$APP_ID" \
             --clientSecret "$CLIENT_SECRET" \
             --tenant "$TENANT_ID"
 
           pac auth select --name "Dev-SP"
 
-      # 5. Read the current online solution version
+          pac auth list
+
+      # 7. Read the current solution version
       - name: Get current solution version
         id: version
         shell: bash
@@ -75,21 +91,21 @@ jobs:
 
           if [ -z "$CURRENT_VERSION" ]; then
             echo "::error::Could not determine the current solution version."
+            echo "::error::Review the PAC CLI output above."
             exit 1
           fi
-
-          echo "Current version: $CURRENT_VERSION"
 
           IFS='.' read -r MAJOR MINOR BUILD REVISION <<< "$CURRENT_VERSION"
 
           NEW_REVISION=$((REVISION + 1))
           NEW_VERSION="$MAJOR.$MINOR.$BUILD.$NEW_REVISION"
 
-          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-
+          echo "Current version: $CURRENT_VERSION"
           echo "New version: $NEW_VERSION"
 
-      # 6. Update the solution version in Dataverse
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      # 8. Update the online solution version in Dev
       - name: Increment online solution version
         shell: bash
         env:
@@ -103,9 +119,9 @@ jobs:
             --solution-version "$NEW_VERSION" \
             --environment "$DEV_URL"
 
-          echo "Solution version updated to $NEW_VERSION"
+          echo "Updated EmployeeALMDemo to version $NEW_VERSION"
 
-      # 7. Export the unmanaged solution from Dev
+      # 9. Export unmanaged solution using Power Platform Actions
       - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -120,7 +136,7 @@ jobs:
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 8. Unpack the ZIP into source-control-friendly files
+      # 10. Unpack solution into source-control-friendly files
       - name: Unpack solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
@@ -129,14 +145,15 @@ jobs:
           solution-type: Unmanaged
           overwrite-files: true
 
-      # 9. Commit the unpacked solution back to GitHub
+      # 11. Commit unpacked solution to GitHub
       - name: Commit solution changes
         shell: bash
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add solutions/EmployeeALMDemo
 
