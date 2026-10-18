@@ -1,7 +1,7 @@
 {
   "EnvironmentVariables": [
     {
-      "SchemaName": "ald_ExternalApiUrl",
+      "SchemaName": "ald_ExternalAPIURL",
       "Value": "https://prod-api.example.com"
     }
   ],
