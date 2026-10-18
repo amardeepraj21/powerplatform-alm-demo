@@ -57,14 +57,16 @@ jobs:
           python -m json.tool deployment-settings/qa.json > /dev/null
           python -m json.tool deployment-settings/prod.json > /dev/null
 
-          echo "Both deployment settings files contain valid JSON."
+          echo "Deployment settings JSON is valid."
 
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Create output folder
+      - name: Create output directory
         shell: bash
-        run: mkdir -p out
+        run: |
+          mkdir -p out
+          mkdir -p out/checker-results
 
       - name: Pack unmanaged solution
         uses: microsoft/powerplatform-actions/pack-solution@v1
@@ -84,15 +86,144 @@ jobs:
           fi
 
           unzip -t "$SOLUTION_ZIP"
-          echo "Solution package created and ZIP integrity verified."
+          echo "Solution ZIP verified successfully."
+
+      - name: Authenticate PAC CLI
+        shell: bash
+        env:
+          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          APP_ID: ${{ secrets.PP_APP_ID }}
+          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DEV_URL" ] || [ -z "$APP_ID" ] || \
+             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::Required Power Platform secrets are missing."
+            exit 1
+          fi
+
+          pac auth create \
+            --name "Dev-SP" \
+            --url "$DEV_URL" \
+            --applicationId "$APP_ID" \
+            --clientSecret "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
+
+          pac auth select --name "Dev-SP"
 
       - name: Run Power Platform Solution Checker
-        uses: microsoft/powerplatform-actions/check-solution@v1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pac solution check \
+            --path "$SOLUTION_ZIP" \
+            --outputDirectory out/checker-results \
+            --geo India
+
+          echo "Solution Checker completed."
+          echo "Generated report files:"
+          find out/checker-results -type f -print
+
+      - name: Block critical Solution Checker findings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python <<'PY'
+          import glob
+          import json
+          import sys
+
+          reports = glob.glob(
+              "out/checker-results/**/*.sarif",
+              recursive=True
+          )
+
+          if not reports:
+              print(
+                  "::error::No SARIF report found. "
+                  "Cannot verify critical findings."
+              )
+              sys.exit(1)
+
+          critical_count = 0
+          unknown_count = 0
+          total_findings = 0
+
+          for report_path in reports:
+              with open(report_path, encoding="utf-8") as file:
+                  report = json.load(file)
+
+              for run in report.get("runs", []):
+                  rules = {
+                      rule.get("id"): rule
+                      for rule in (
+                          run.get("tool", {})
+                          .get("driver", {})
+                          .get("rules", [])
+                      )
+                  }
+
+                  for result in run.get("results", []):
+                      total_findings += 1
+
+                      result_props = result.get("properties") or {}
+                      rule = rules.get(result.get("ruleId"), {})
+                      rule_props = rule.get("properties") or {}
+
+                      severity = (
+                          result_props.get("problem.severity")
+                          or result_props.get("severity")
+                          or rule_props.get("problem.severity")
+                          or rule_props.get("severity")
+                      )
+
+                      if not isinstance(severity, str):
+                          unknown_count += 1
+                          continue
+
+                      severity = severity.strip().lower()
+
+                      if severity == "critical":
+                          critical_count += 1
+                      elif severity not in (
+                          "high",
+                          "medium",
+                          "low",
+                          "informational",
+                          "info"
+                      ):
+                          unknown_count += 1
+
+          print(f"Total findings: {total_findings}")
+          print(f"Critical findings: {critical_count}")
+          print(f"Unknown severity findings: {unknown_count}")
+
+          if critical_count > 0:
+              print(
+                  "::error::Critical issues detected. "
+                  "Build is blocked."
+              )
+              sys.exit(1)
+
+          if unknown_count > 0:
+              print(
+                  "::error::Some findings have an unknown severity. "
+                  "Review the report before allowing the build."
+              )
+              sys.exit(1)
+
+          print("Quality gate passed: no critical issues detected.")
+          PY
+
+      - name: Upload Solution Checker reports
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          app-id: ${{ secrets.PP_APP_ID }}
-          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.PP_TENANT_ID }}
-          path: ${{ env.SOLUTION_ZIP }}
-          geo: India
-          fail-on-analysis-error: true
-          checker-logs-artifact-name: ${{ env.SOLUTION_NAME }}-Checker-Logs
+          name: ${{ env.SOLUTION_NAME }}-Checker-Reports
+          path: out/checker-results/
+          if-no-files-found: warn
+          retention-days: 30
