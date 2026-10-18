@@ -81,10 +81,22 @@
           },
           "type": "Compose",
           "inputs": "@parameters('External API URL (ald_ExternalAPIURL)')"
+        },
+        "Compose": {
+          "runAfter": {
+            "Compose_External_API_URL": [
+              "Succeeded"
+            ]
+          },
+          "metadata": {
+            "operationMetadataId": "bc3bd494-9d59-4379-9c43-e29e1bcfeceb"
+          },
+          "type": "Compose",
+          "inputs": "First test 1"
         }
       }
     },
-    "templateName": null
+    "templateName": ""
   },
   "schemaVersion": "1.0.0.0"
 }
