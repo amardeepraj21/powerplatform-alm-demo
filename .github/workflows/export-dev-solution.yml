@@ -32,6 +32,65 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
+      - name: Authenticate PAC CLI to Dev
+        shell: bash
+        env:
+          PP_APP_ID: ${{ secrets.PP_APP_ID }}
+          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+        run: |
+          pac auth create \
+            --name Dev \
+            --applicationId "$PP_APP_ID" \
+            --clientSecret "$PP_CLIENT_SECRET" \
+            --tenant "$PP_TENANT_ID" \
+            --url "$DEV_ENVIRONMENT_URL"
+
+      - name: Increment solution version in Dev
+        id: version
+        shell: bash
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          DEV_ENVIRONMENT_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
+        run: |
+          set -euo pipefail
+
+          OUTPUT=$(pac solution online-version \
+            --solution-name "$SOLUTION_NAME" \
+            --environment "$DEV_ENVIRONMENT_URL" 2>&1) || {
+              echo "$OUTPUT"
+              echo "::error::Could not read the current solution version."
+              exit 1
+            }
+
+          echo "$OUTPUT"
+
+          CURRENT_VERSION=$(printf '%s\n' "$OUTPUT" |
+            grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
+            tail -n 1)
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "::error::Could not parse the current four-part version."
+            exit 1
+          fi
+
+          IFS='.' read -r MAJOR MINOR BUILD REVISION \
+            <<< "$CURRENT_VERSION"
+
+          NEW_REVISION=$((REVISION + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${BUILD}.${NEW_REVISION}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "New version: $NEW_VERSION"
+
+          pac solution online-version \
+            --solution-name "$SOLUTION_NAME" \
+            --solution-version "$NEW_VERSION" \
+            --environment "$DEV_ENVIRONMENT_URL"
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Create export folder
         run: mkdir -p out
 
@@ -65,6 +124,7 @@ jobs:
         env:
           SOLUTION_NAME: ${{ inputs.solution_name }}
         run: |
+          set -euo pipefail
           SOURCE_DIR="solutions/${SOLUTION_NAME}"
 
           if [ ! -d "$SOURCE_DIR" ]; then
@@ -84,7 +144,10 @@ jobs:
         shell: bash
         env:
           SOLUTION_NAME: ${{ inputs.solution_name }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
@@ -93,8 +156,9 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "No source changes to commit."
+            echo "Dev version is now ${NEW_VERSION}."
             exit 0
           fi
 
-          git commit -m "Export ${SOLUTION_NAME} from Dev"
+          git commit -m "Export ${SOLUTION_NAME} v${NEW_VERSION} from Dev"
           git push origin "HEAD:${GITHUB_REF_NAME}"
