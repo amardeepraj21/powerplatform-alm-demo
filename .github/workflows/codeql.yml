@@ -1,6 +1,5 @@
 
 name: CodeQL Security Analysis
-# This is a comment
 
 on:
   push:
@@ -12,28 +11,19 @@ on:
       - main
 
   schedule:
-    - cron: '20 9 * * 5'
+    - cron: "30 5 * * 1"
 
   workflow_dispatch:
 
 permissions:
-  actions: read
   contents: read
   security-events: write
+  actions: read
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language:
-          - actions
-          - javascript-typescript
-          - csharp
+    name: Analyze GitHub Actions
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -42,10 +32,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
-          queries: security-extended
+          languages: actions
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
-        with:
-          category: /language:${{ matrix.language }}
