@@ -18,7 +18,6 @@ env:
   SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
 
 jobs:
-  # Job 1: Automatically select and validate the build.
   resolve-build:
     name: Find Build to Deploy
     runs-on: ubuntu-latest
@@ -64,7 +63,7 @@ jobs:
             fi
 
             BUILD_RUN_ID="$REQUESTED_BUILD_RUN_ID"
-            echo "Using manually specified Build Run ID: $BUILD_RUN_ID"
+            echo "Using specified Build Run ID: $BUILD_RUN_ID"
           else
             echo "Finding the latest successful Build Managed Solution run on main..."
 
@@ -110,7 +109,6 @@ jobs:
             exit 1
           fi
 
-          # Verify the expected artifact exists and has not expired.
           ARTIFACTS=$(gh api \
             "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts")
 
@@ -136,10 +134,9 @@ jobs:
             echo "- **Artifact:** managed-solution"
             echo "- **Build run:** $RUN_URL"
             echo ""
-            echo "Review this build before approving Production deployment."
+            echo "Review the selected build before approving Production deployment."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Job 2: Wait for Production environment approval, then deploy.
   deploy-prod:
     name: Deploy Managed Solution to Production
     runs-on: windows-latest
@@ -152,6 +149,9 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Display selected build
         shell: pwsh
         env:
@@ -159,9 +159,6 @@ jobs:
         run: |
           Write-Host "Selected Build Run ID: $env:BUILD_RUN_ID"
           Write-Host "Artifact: managed-solution"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Validate Production configuration
         shell: pwsh
@@ -185,10 +182,6 @@ jobs:
           }
 
           Write-Host "Production deployment configuration validated."
-
-      # Required by the Microsoft Power Platform Actions.
-      - name: Install Power Platform Tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
 
       - name: Download selected managed solution artifact
         uses: actions/download-artifact@v8
@@ -235,26 +228,11 @@ jobs:
           Write-Host "File: $zipPath"
           Write-Host "Size: $($file.Length) bytes"
 
-      - name: Authenticate to Production
-        shell: pwsh
-        env:
-          PP_APP_ID: ${{ secrets.PP_APP_ID }}
-          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
-          PROD_ENVIRONMENT_URL: ${{ secrets.PROD_ENVIRONMENT_URL }}
-        run: |
-          $ErrorActionPreference = "Stop"
+      # Initializes the tooling required by Power Platform Actions.
+      - name: Install Power Platform Tools
+        uses: microsoft/powerplatform-actions/actions-install@v1
 
-          pac auth create `
-            --name Production `
-            --applicationId $env:PP_APP_ID `
-            --clientSecret $env:PP_CLIENT_SECRET `
-            --tenant $env:PP_TENANT_ID `
-            --environment $env:PROD_ENVIRONMENT_URL
-
-          pac auth select --name Production
-          pac org who
-
+      # This action authenticates using the supplied service principal.
       - name: Import managed solution into Production
         uses: microsoft/powerplatform-actions/import-solution@v1
         with:
