@@ -45,7 +45,7 @@ jobs:
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Set up .NET
+      # 3. Set up .NET for PAC CLI
       - name: Set up .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -93,13 +93,12 @@ jobs:
 
           pac auth select --name "Dev-SP"
 
-      # 7. Calculate the next solution version
+      # 7. Calculate next solution version
       - name: Calculate solution version
         id: version
         shell: bash
         env:
           DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
           VERSION_TYPE: ${{ inputs.version_type }}
           CUSTOM_VERSION: ${{ inputs.custom_version }}
         run: |
@@ -121,7 +120,7 @@ jobs:
             head -n 1 || true)
 
           if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not determine the current solution version."
+            echo "::error::Could not determine current solution version."
             exit 1
           fi
 
@@ -149,7 +148,6 @@ jobs:
                 echo "::error::Enter a valid four-part version, e.g. 2.3.0.0."
                 exit 1
               fi
-
               NEW_VERSION="$CUSTOM_VERSION"
               ;;
             *)
@@ -168,13 +166,12 @@ jobs:
           done
 
           if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
-            echo "::error::New version must differ from the current version."
+            echo "::error::New version must differ from current version."
             exit 1
           fi
 
           echo "Current version: $CURRENT_VERSION"
           echo "New version: $NEW_VERSION"
-          echo "Version selection: $VERSION_TYPE"
 
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
@@ -184,7 +181,6 @@ jobs:
         shell: bash
         env:
           DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           set -euo pipefail
@@ -201,7 +197,7 @@ jobs:
         shell: bash
         run: mkdir -p out
 
-      # 10. Export unmanaged ZIP
+      # 10. Export unmanaged solution
       - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -216,7 +212,8 @@ jobs:
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 11. Export managed ZIP
+      # 11. Export managed solution into the SAME directory.
+      # PAC CLI Both unpacking uses the matching managed ZIP.
       - name: Export managed solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -231,18 +228,7 @@ jobs:
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 12. Unpack the unmanaged ZIP into the single source folder.
-      # Both allows managed/unmanaged-specific files to be reconciled
-      # when the matching managed ZIP is available in the same directory.
-      - name: Unpack solution source
-        uses: microsoft/powerplatform-actions/unpack-solution@v1
-        with:
-          solution-file: out/${{ env.SOLUTION_NAME }}.zip
-          solution-folder: solutions/${{ env.SOLUTION_NAME }}
-          solution-type: Both
-          overwrite-files: true
-
-      # 13. Verify both ZIPs and the unpacked source
+      # 12. Verify both exports and their matching names
       - name: Verify exported packages
         shell: bash
         run: |
@@ -250,20 +236,69 @@ jobs:
 
           UNMANAGED_ZIP="out/${SOLUTION_NAME}.zip"
           MANAGED_ZIP="out/${SOLUTION_NAME}_managed.zip"
-          SOURCE_FOLDER="solutions/${SOLUTION_NAME}"
 
-          test -s "$UNMANAGED_ZIP"
-          test -s "$MANAGED_ZIP"
+          if [ ! -s "$UNMANAGED_ZIP" ]; then
+            echo "::error::Unmanaged ZIP missing: $UNMANAGED_ZIP"
+            exit 1
+          fi
+
+          if [ ! -s "$MANAGED_ZIP" ]; then
+            echo "::error::Managed ZIP missing: $MANAGED_ZIP"
+            exit 1
+          fi
 
           unzip -t "$UNMANAGED_ZIP"
           unzip -t "$MANAGED_ZIP"
 
-          test -f "$SOURCE_FOLDER/Other/Solution.xml"
+          echo "Both solution exports are present and valid."
+          ls -lh "$UNMANAGED_ZIP" "$MANAGED_ZIP"
 
-          echo "Both exported ZIPs passed archive checks."
-          echo "Unpacked source is present at $SOURCE_FOLDER."
+      # 13. Unpack BOTH formats into the Git source folder.
+      # The matching *_managed.zip must remain beside the unmanaged ZIP.
+      - name: Unpack combined solution source
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # 14. Push the exported source and create a PR
+          UNMANAGED_ZIP="out/${SOLUTION_NAME}.zip"
+          SOURCE_FOLDER="solutions/${SOLUTION_NAME}"
+
+          mkdir -p solutions
+
+          # Remove old source so files from an earlier export
+          # cannot accidentally remain in the new source.
+          rm -rf "$SOURCE_FOLDER"
+
+          pac solution unpack \
+            --zipfile "$UNMANAGED_ZIP" \
+            --folder "$SOURCE_FOLDER" \
+            --packagetype Both \
+            --clobber
+
+          if [ ! -s "$SOURCE_FOLDER/Other/Solution.xml" ]; then
+            echo "::error::Unpacked Solution.xml was not found."
+            exit 1
+          fi
+
+          echo "Combined solution source created successfully."
+          echo "Source folder: $SOURCE_FOLDER"
+          find "$SOURCE_FOLDER" -type f | wc -l
+
+      # 14. Stage the source changes
+      - name: Stage solution source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add "solutions/$SOLUTION_NAME"
+
+          if git diff --cached --quiet; then
+            echo "No solution source changes detected."
+            echo "Dev version may already have been updated."
+            exit 0
+          fi
+
+      # 15. Push export branch and create PR
       - name: Push export branch and create pull request
         shell: bash
         env:
@@ -280,17 +315,15 @@ jobs:
             exit 1
           fi
 
+          # Skip creating an empty PR.
+          if git diff --cached --quiet; then
+            echo "No staged changes. Skipping PR creation."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add "solutions/$SOLUTION_NAME"
-
-          if git diff --cached --quiet; then
-            echo "No solution source changes detected."
-            echo "Dev version may already have been updated to $NEW_VERSION."
-            exit 0
-          fi
 
           BRANCH_NAME="automation/export-dev-${GITHUB_RUN_ID}"
 
@@ -315,15 +348,15 @@ jobs:
           - New version: $NEW_VERSION
           - Version update type: $VERSION_TYPE
           - Exported managed and unmanaged packages from Dev.
-          - Updated the repository's unpacked solution source.
+          - Unpacked both formats into the source folder for Git.
 
           ## Validation
-          Review the changes and ensure required validation checks pass before merging.
-          After merging, the managed build workflow will generate the deployment artifact.")
+          Review the source changes and ensure required checks pass before merging.
+          The managed build workflow runs after the source is merged to main.")
 
           echo "Pull request created: $PR_URL"
 
-      # 15. Upload exports for troubleshooting
+      # 16. Upload exported ZIPs for troubleshooting
       - name: Upload exported packages
         if: always()
         uses: actions/upload-artifact@v6
