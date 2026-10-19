@@ -18,7 +18,6 @@ env:
   SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
 
 jobs:
-  # Job 1: Find and validate the build before Production approval.
   resolve-build:
     name: Find Build to Deploy
     runs-on: ubuntu-latest
@@ -29,6 +28,11 @@ jobs:
     steps:
       - name: Validate repository configuration
         shell: bash
+        env:
+          PP_APP_ID: ${{ secrets.PP_APP_ID }}
+          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          PROD_ENVIRONMENT_URL: ${{ secrets.PROD_ENVIRONMENT_URL }}
         run: |
           set -euo pipefail
 
@@ -37,10 +41,8 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "${{ secrets.PP_APP_ID }}" ||
-                -z "${{ secrets.PP_TENANT_ID }}" ||
-                -z "${{ secrets.PP_CLIENT_SECRET }}" ||
-                -z "${{ secrets.PROD_ENVIRONMENT_URL }}" ]]; then
+          if [[ -z "$PP_APP_ID" || -z "$PP_TENANT_ID" ||
+                -z "$PP_CLIENT_SECRET" || -z "$PROD_ENVIRONMENT_URL" ]]; then
             echo "::error::One or more required Power Platform secrets are missing."
             exit 1
           fi
@@ -61,7 +63,7 @@ jobs:
             fi
 
             BUILD_RUN_ID="$REQUESTED_BUILD_RUN_ID"
-            echo "Using the manually specified Build Run ID: $BUILD_RUN_ID"
+            echo "Using specified Build Run ID: $BUILD_RUN_ID"
           else
             echo "Finding the latest successful Build Managed Solution run on main..."
 
@@ -82,7 +84,6 @@ jobs:
             echo "Automatically selected Build Run ID: $BUILD_RUN_ID"
           fi
 
-          # Validate the selected run.
           RUN_DETAILS=$(gh run view "$BUILD_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --json databaseId,workflowName,status,conclusion,headBranch,headSha,url)
@@ -108,7 +109,6 @@ jobs:
             exit 1
           fi
 
-          # Confirm that the expected artifact exists and has not expired.
           ARTIFACTS=$(gh api \
             "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts")
 
@@ -117,7 +117,7 @@ jobs:
             '[.artifacts[] | select(.name == $name and .expired == false)] | length')
 
           if [[ "$ARTIFACT_COUNT" -lt 1 ]]; then
-            echo "::error::The selected build does not contain an available managed-solution artifact."
+            echo "::error::The selected build has no available managed-solution artifact."
             exit 1
           fi
 
@@ -134,10 +134,9 @@ jobs:
             echo "- **Artifact:** managed-solution"
             echo "- **Build run:** $RUN_URL"
             echo ""
-            echo "Review this build before approving the Production deployment."
+            echo "Review the selected build before approving Production deployment."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Job 2: GitHub pauses here for Production environment approval.
   deploy-prod:
     name: Deploy Managed Solution to Production
     runs-on: windows-latest
@@ -151,12 +150,12 @@ jobs:
 
     steps:
       - name: Display selected build
-        shell: bash
+        shell: pwsh
         env:
           BUILD_RUN_ID: ${{ needs.resolve-build.outputs.build_run_id }}
         run: |
-          echo "Deploying Build Run ID: $BUILD_RUN_ID"
-          echo "Artifact: managed-solution"
+          Write-Host "Deploying Build Run ID: $env:BUILD_RUN_ID"
+          Write-Host "Artifact: managed-solution"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -239,7 +238,9 @@ jobs:
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
           "PATH=$env:PATH" >> $env:GITHUB_ENV
 
-          pac --version
+          # pac --version is not supported by this CLI version.
+          # pac help confirms that the CLI is available.
+          pac help
 
       - name: Authenticate to Production
         shell: pwsh
