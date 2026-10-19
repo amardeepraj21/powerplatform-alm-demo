@@ -1,4 +1,3 @@
-
 name: Deploy to Production
 
 on:
@@ -15,7 +14,7 @@ permissions:
 
 env:
   SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
-  ARTIFACT_NAME: ${{ vars.PP_SOLUTION_NAME }}-managed
+  ARTIFACT_NAME: managed-solution
   SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
 
 jobs:
@@ -23,19 +22,22 @@ jobs:
     name: Deploy Managed Solution to Production
     runs-on: ubuntu-24.04
 
-    # GitHub pauses this job until Production approval is granted.
+    # Wait for approval configured in GitHub Settings > Environments > Production.
     environment:
       name: Production
       url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
+    # Prevent concurrent Production deployments.
     concurrency:
       group: production-deployment
       cancel-in-progress: false
 
     steps:
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # 2. Validate configuration and deployment settings
       - name: Validate configuration
         shell: bash
         env:
@@ -70,6 +72,11 @@ jobs:
 
           python -m json.tool deployment-settings/prod.json > /dev/null
 
+          echo "Configuration validation passed."
+          echo "Solution: $SOLUTION_NAME"
+          echo "Expected artifact: $ARTIFACT_NAME"
+
+      # 3. Verify that the selected run is the successful build on main
       - name: Verify selected build run
         shell: bash
         env:
@@ -80,48 +87,90 @@ jobs:
 
           RUN_INFO=$(gh run view "$BUILD_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --json workflowName,conclusion,headBranch)
+            --json workflowName,conclusion,headBranch,status)
 
           WORKFLOW_NAME=$(echo "$RUN_INFO" | jq -r '.workflowName')
           CONCLUSION=$(echo "$RUN_INFO" | jq -r '.conclusion')
           BRANCH=$(echo "$RUN_INFO" | jq -r '.headBranch')
+          STATUS=$(echo "$RUN_INFO" | jq -r '.status')
 
           if [ "$WORKFLOW_NAME" != "Build Managed Solution" ]; then
-            echo "::error::The selected run is not the managed-solution build workflow."
+            echo "::error::The selected run is not the Build Managed Solution workflow."
             exit 1
           fi
 
-          if [ "$CONCLUSION" != "success" ] || [ "$BRANCH" != "main" ]; then
-            echo "::error::The build must have succeeded on main."
+          if [ "$STATUS" != "completed" ] || \
+             [ "$CONCLUSION" != "success" ] || \
+             [ "$BRANCH" != "main" ]; then
+            echo "::error::The selected build must be completed successfully on main."
+            echo "Status: $STATUS"
+            echo "Conclusion: $CONCLUSION"
+            echo "Branch: $BRANCH"
             exit 1
           fi
 
           echo "Verified successful managed-solution build: $BUILD_RUN_ID"
 
+      # 4. Verify the expected artifact exists and has not expired
+      - name: Verify managed artifact exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_INFO=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts" \
+            --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\" and .expired == false) | {name: .name, expired: .expired, size_in_bytes: .size_in_bytes}" \
+            | head -n 1 || true)
+
+          if [ -z "$ARTIFACT_INFO" ]; then
+            echo "::error::Artifact '$ARTIFACT_NAME' was not found or has expired."
+            echo "Build run: $BUILD_RUN_ID"
+            echo "Check the Artifacts section of that build run."
+            exit 1
+          fi
+
+          echo "$ARTIFACT_INFO"
+          echo "Managed artifact is available."
+
+      # 5. Download the artifact from the exact build run
       - name: Download the exact managed artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: out
+          repository: ${{ github.repository }}
           run-id: ${{ inputs.build_run_id }}
           github-token: ${{ github.token }}
 
+      # 6. Verify managed solution ZIP integrity
       - name: Verify managed solution ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -s "$SOLUTION_ZIP" ]; then
-            echo "::error::Managed solution ZIP not found: $SOLUTION_ZIP"
+          PACKAGE="$SOLUTION_ZIP"
+
+          if [ ! -s "$PACKAGE" ]; then
+            echo "::error::Managed solution ZIP not found: $PACKAGE"
+            echo "Files downloaded:"
+            find out -maxdepth 2 -type f -print || true
             exit 1
           fi
 
-          unzip -t "$SOLUTION_ZIP"
-          echo "Managed solution ZIP integrity verified."
+          echo "Checking ZIP integrity..."
+          unzip -t "$PACKAGE"
 
+          echo "Managed solution ZIP verified:"
+          ls -lh "$PACKAGE"
+
+      # 7. Install Power Platform tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
+      # 8. Verify Production environment connection
       - name: Verify Production environment connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -130,6 +179,7 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
+      # 9. Import managed solution into Production
       - name: Import managed solution into Production
         uses: microsoft/powerplatform-actions/import-solution@v1
         with:
