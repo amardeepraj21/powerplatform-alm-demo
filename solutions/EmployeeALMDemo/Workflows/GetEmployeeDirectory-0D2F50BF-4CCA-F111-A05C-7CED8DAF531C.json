@@ -15,13 +15,13 @@
       "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
       "contentVersion": "1.0.0.0",
       "parameters": {
-        "$authentication": {
-          "defaultValue": {},
-          "type": "SecureObject"
-        },
         "$connections": {
           "defaultValue": {},
           "type": "Object"
+        },
+        "$authentication": {
+          "defaultValue": {},
+          "type": "SecureObject"
         },
         "External API URL (ald_ExternalAPIURL)": {
           "defaultValue": "https://dev-api.example.com",
@@ -55,14 +55,18 @@
           },
           "type": "OpenApiConnection",
           "inputs": {
+            "host": {
+              "connectionName": "shared_commondataserviceforapps_1",
+              "operationId": "ListRecords",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
+            },
             "parameters": {
               "entityName": "ald_employees",
               "$top": 10
             },
-            "host": {
-              "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
-              "operationId": "ListRecords",
-              "connectionName": "shared_commondataserviceforapps_1"
+            "authentication": {
+              "type": "Raw",
+              "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
             }
           }
         },
@@ -77,22 +81,10 @@
           },
           "type": "Compose",
           "inputs": "@parameters('External API URL (ald_ExternalAPIURL)')"
-        },
-        "Compose": {
-          "runAfter": {
-            "Compose_External_API_URL": [
-              "Succeeded"
-            ]
-          },
-          "metadata": {
-            "operationMetadataId": "bc3bd494-9d59-4379-9c43-e29e1bcfeceb"
-          },
-          "type": "Compose",
-          "inputs": "First test 222"
         }
       }
     },
-    "templateName": null
+    "templateName": ""
   },
   "schemaVersion": "1.0.0.0"
 }
