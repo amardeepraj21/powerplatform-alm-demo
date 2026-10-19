@@ -31,11 +31,11 @@ env:
 
 jobs:
   export-dev-solution:
-    name: Export Unmanaged Solution from Dev
+    name: Export Dev Solution
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Checkout the repository
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
@@ -64,7 +64,7 @@ jobs:
 
           "$HOME/.dotnet/tools/pac" help
 
-      # 5. Verify service principal access to Dev
+      # 5. Verify Dev connection
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -106,7 +106,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            echo "::error::PP_SOLUTION_NAME is not configured."
             exit 1
           fi
 
@@ -179,7 +179,7 @@ jobs:
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      # 8. Update the solution version in Dev
+      # 8. Update solution version in Dev
       - name: Update solution version in Dev
         shell: bash
         env:
@@ -196,12 +196,12 @@ jobs:
 
           echo "Updated $SOLUTION_NAME to version $NEW_VERSION."
 
-      # 9. Create the export directory
+      # 9. Create export directory
       - name: Create export directory
         shell: bash
         run: mkdir -p out
 
-      # 10. Export only the unmanaged solution from Dev
+      # 10. Export unmanaged ZIP
       - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -210,46 +210,60 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
           solution-name: ${{ env.SOLUTION_NAME }}
-          solution-output-file: out/${{ env.SOLUTION_NAME }}_unmanaged.zip
+          solution-output-file: out/${{ env.SOLUTION_NAME }}.zip
           managed: false
           overwrite: true
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 11. Unpack the unmanaged export into the single source folder
-      - name: Unpack unmanaged solution source
+      # 11. Export managed ZIP
+      - name: Export managed solution
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-name: ${{ env.SOLUTION_NAME }}
+          solution-output-file: out/${{ env.SOLUTION_NAME }}_managed.zip
+          managed: true
+          overwrite: true
+          run-asynchronously: true
+          max-async-wait-time: 60
+
+      # 12. Unpack the unmanaged ZIP into the single source folder.
+      # Both allows managed/unmanaged-specific files to be reconciled
+      # when the matching managed ZIP is available in the same directory.
+      - name: Unpack solution source
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: out/${{ env.SOLUTION_NAME }}_unmanaged.zip
+          solution-file: out/${{ env.SOLUTION_NAME }}.zip
           solution-folder: solutions/${{ env.SOLUTION_NAME }}
-          solution-type: Unmanaged
+          solution-type: Both
           overwrite-files: true
 
-      # 12. Verify the export and unpacked source
-      - name: Verify exported solution
+      # 13. Verify both ZIPs and the unpacked source
+      - name: Verify exported packages
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="out/${SOLUTION_NAME}_unmanaged.zip"
+          UNMANAGED_ZIP="out/${SOLUTION_NAME}.zip"
+          MANAGED_ZIP="out/${SOLUTION_NAME}_managed.zip"
           SOURCE_FOLDER="solutions/${SOLUTION_NAME}"
 
-          if [ ! -s "$ZIP_FILE" ]; then
-            echo "::error::Unmanaged solution ZIP is missing or empty."
-            exit 1
-          fi
+          test -s "$UNMANAGED_ZIP"
+          test -s "$MANAGED_ZIP"
 
-          unzip -t "$ZIP_FILE"
+          unzip -t "$UNMANAGED_ZIP"
+          unzip -t "$MANAGED_ZIP"
 
-          if [ ! -f "$SOURCE_FOLDER/Other/Solution.xml" ]; then
-            echo "::error::Unpacked Solution.xml was not found."
-            exit 1
-          fi
+          test -f "$SOURCE_FOLDER/Other/Solution.xml"
 
-          echo "Unmanaged export and source validation completed."
-          ls -lh "$ZIP_FILE"
+          echo "Both exported ZIPs passed archive checks."
+          echo "Unpacked source is present at $SOURCE_FOLDER."
 
-      # 13. Create a branch and open a pull request
+      # 14. Push the exported source and create a PR
       - name: Push export branch and create pull request
         shell: bash
         env:
@@ -262,7 +276,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "$ALM_GITHUB_TOKEN" ]; then
-            echo "::error::Repository secret ALM_GITHUB_TOKEN is not configured."
+            echo "::error::ALM_GITHUB_TOKEN is not configured."
             exit 1
           fi
 
@@ -300,22 +314,21 @@ jobs:
           - Previous version: $CURRENT_VERSION
           - New version: $NEW_VERSION
           - Version update type: $VERSION_TYPE
-          - Exported the unmanaged solution from Dev.
-          - Updated the single unpacked solution source folder.
+          - Exported managed and unmanaged packages from Dev.
+          - Updated the repository's unpacked solution source.
 
           ## Validation
-          Review the exported source changes and ensure required validation checks pass before merging.
-
-          After merging, the Build Managed Solution workflow will generate the managed deployment artifact.")
+          Review the changes and ensure required validation checks pass before merging.
+          After merging, the managed build workflow will generate the deployment artifact.")
 
           echo "Pull request created: $PR_URL"
 
-      # 14. Upload the unmanaged export for troubleshooting
-      - name: Upload unmanaged export artifact
+      # 15. Upload exports for troubleshooting
+      - name: Upload exported packages
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.SOLUTION_NAME }}-dev-unmanaged-export-${{ github.run_id }}
-          path: out/${{ env.SOLUTION_NAME }}_unmanaged.zip
+          name: ${{ env.SOLUTION_NAME }}-dev-exports-${{ github.run_id }}
+          path: out/*.zip
           if-no-files-found: ignore
           retention-days: 7
