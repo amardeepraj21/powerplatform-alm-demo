@@ -70,7 +70,7 @@
             }
           }
         },
-        "Compose_External_API_URL": {
+        "Compose_External_API_URL_-_1": {
           "runAfter": {
             "List_rows": [
               "Succeeded"
@@ -81,6 +81,18 @@
           },
           "type": "Compose",
           "inputs": "@parameters('External API URL (ald_ExternalAPIURL)')"
+        },
+        "Compose": {
+          "runAfter": {
+            "Compose_External_API_URL_-_1": [
+              "Succeeded"
+            ]
+          },
+          "metadata": {
+            "operationMetadataId": "d7829847-308f-4534-a547-6555fb0d1fd9"
+          },
+          "type": "Compose",
+          "inputs": "Test"
         }
       }
     },
