@@ -1,3 +1,4 @@
+
 name: Export Dev Solution
 
 on:
@@ -16,7 +17,7 @@ on:
           - custom
 
       custom_version:
-        description: "Custom version (example: 2.3.0.0). Used only when version_type is custom."
+        description: "Custom version (example: 2.3.0.0)"
         required: false
         type: string
         default: ""
@@ -33,36 +34,27 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      # 2. Install Power Platform tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 3. Install .NET SDK
       - name: Set up .NET
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
 
-      # 4. Install standalone PAC CLI
       - name: Install PAC CLI
         shell: bash
         run: |
           set -euo pipefail
-
           dotnet tool update --global Microsoft.PowerApps.CLI.Tool \
             || dotnet tool install --global Microsoft.PowerApps.CLI.Tool
-
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-          "$HOME/.dotnet/tools/pac" help
-
-      # 5. Verify service principal access to Dev
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -71,7 +63,6 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
 
-      # 6. Authenticate PAC CLI to Dev
       - name: Authenticate PAC CLI to Dev
         shell: bash
         env:
@@ -81,17 +72,14 @@ jobs:
           TENANT_ID: ${{ secrets.PP_TENANT_ID }}
         run: |
           set -euo pipefail
-
           pac auth create \
             --name "Dev-SP" \
             --url "$DEV_URL" \
             --applicationId "$APP_ID" \
             --clientSecret "$CLIENT_SECRET" \
             --tenant "$TENANT_ID"
-
           pac auth select --name "Dev-SP"
 
-      # 7. Read current version and calculate requested version
       - name: Calculate solution version
         id: version
         shell: bash
@@ -104,7 +92,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            echo "::error::PP_SOLUTION_NAME is not configured."
             exit 1
           fi
 
@@ -118,13 +106,8 @@ jobs:
             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
             head -n 1 || true)
 
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "::error::Could not determine the current solution version."
-            exit 1
-          fi
-
           if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid current solution version: $CURRENT_VERSION"
+            echo "::error::Could not determine the current solution version."
             exit 1
           fi
 
@@ -135,41 +118,32 @@ jobs:
               REVISION=$((REVISION + 1))
               NEW_VERSION="$MAJOR.$MINOR.$BUILD.$REVISION"
               ;;
-
             build)
               BUILD=$((BUILD + 1))
               NEW_VERSION="$MAJOR.$MINOR.$BUILD.0"
               ;;
-
             minor)
               MINOR=$((MINOR + 1))
               NEW_VERSION="$MAJOR.$MINOR.0.0"
               ;;
-
             major)
               MAJOR=$((MAJOR + 1))
               NEW_VERSION="$MAJOR.0.0.0"
               ;;
-
             custom)
               if [[ ! "$CUSTOM_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-                echo "::error::Provide a valid four-part custom version, for example 2.3.0.0."
+                echo "::error::Enter a valid four-part version."
                 exit 1
               fi
-
               NEW_VERSION="$CUSTOM_VERSION"
               ;;
-
             *)
               echo "::error::Unsupported version type: $VERSION_TYPE"
               exit 1
               ;;
           esac
 
-          # Validate the version components against the supported
-          # unsigned 16-bit version component range.
           IFS='.' read -r V1 V2 V3 V4 <<< "$NEW_VERSION"
-
           for PART in "$V1" "$V2" "$V3" "$V4"; do
             if (( PART > 65535 )); then
               echo "::error::Version components must not exceed 65535."
@@ -177,20 +151,14 @@ jobs:
             fi
           done
 
-          # Prevent accidental reuse of the existing version.
           if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
-            echo "::error::The new version is the same as the current version."
+            echo "::error::New version must differ from the current version."
             exit 1
           fi
-
-          echo "Current version: $CURRENT_VERSION"
-          echo "Version selection: $VERSION_TYPE"
-          echo "New version: $NEW_VERSION"
 
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      # 8. Update online solution version in Dev
       - name: Update solution version in Dev
         shell: bash
         env:
@@ -199,15 +167,15 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           set -euo pipefail
-
           pac solution online-version \
             --solution-name "$SOLUTION_NAME" \
             --solution-version "$NEW_VERSION" \
             --environment "$DEV_URL"
 
-          echo "Updated $SOLUTION_NAME to version $NEW_VERSION"
+      - name: Create export directories
+        shell: bash
+        run: mkdir -p out
 
-      # 9. Export unmanaged solution
       - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
@@ -216,26 +184,46 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
           solution-name: ${{ env.SOLUTION_NAME }}
-          solution-output-file: ${{ env.SOLUTION_NAME }}.zip
+          solution-output-file: out/${{ env.SOLUTION_NAME }}_unmanaged.zip
           managed: false
           overwrite: true
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 10. Unpack solution into source-control-friendly files
-      - name: Unpack solution
+      - name: Export managed solution
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
+          app-id: ${{ secrets.PP_APP_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          solution-name: ${{ env.SOLUTION_NAME }}
+          solution-output-file: out/${{ env.SOLUTION_NAME }}_managed.zip
+          managed: true
+          overwrite: true
+          run-asynchronously: true
+          max-async-wait-time: 60
+
+      - name: Unpack solution source for managed and unmanaged builds
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: ${{ env.SOLUTION_NAME }}.zip
+          solution-file: out/${{ env.SOLUTION_NAME }}_unmanaged.zip
           solution-folder: solutions/${{ env.SOLUTION_NAME }}
-          solution-type: Unmanaged
+          solution-type: Both
           overwrite-files: true
 
-      # 11. Commit changes to a branch and create a PR
+      - name: Verify exported packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -t "out/${SOLUTION_NAME}_unmanaged.zip"
+          unzip -t "out/${SOLUTION_NAME}_managed.zip"
+          test -f "solutions/${SOLUTION_NAME}/Other/Solution.xml"
+          echo "Both packages verified; source unpacked."
+
       - name: Push export branch and create pull request
         shell: bash
         env:
-          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
           ALM_GITHUB_TOKEN: ${{ secrets.ALM_GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.ALM_GITHUB_TOKEN }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
@@ -244,13 +232,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
-            exit 1
-          fi
-
           if [ -z "$ALM_GITHUB_TOKEN" ]; then
-            echo "::error::Repository secret ALM_GITHUB_TOKEN is not configured."
+            echo "::error::ALM_GITHUB_TOKEN is not configured."
             exit 1
           fi
 
@@ -261,9 +244,9 @@ jobs:
           git add "solutions/$SOLUTION_NAME"
 
           if git diff --cached --quiet; then
-            echo "::error::No solution source changes detected. No pull request was created."
+            echo "No solution source changes detected."
             echo "The Dev version may already have been updated to $NEW_VERSION."
-            exit 1
+            exit 0
           fi
 
           BRANCH_NAME="automation/export-dev-${GITHUB_RUN_ID}"
@@ -271,13 +254,11 @@ jobs:
           git checkout -b "$BRANCH_NAME"
           git commit -m "Export $SOLUTION_NAME from Dev ($NEW_VERSION)"
 
-          # Authenticate Git pushes with the fine-grained PAT.
           git remote set-url origin \
             "https://x-access-token:${ALM_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git push --set-upstream origin "$BRANCH_NAME"
 
-          # Create a PR targeting main.
           PR_URL=$(gh pr create \
             --repo "$GITHUB_REPOSITORY" \
             --base main \
@@ -288,11 +269,19 @@ jobs:
           - Previous version: $CURRENT_VERSION
           - New version: $NEW_VERSION
           - Version update type: $VERSION_TYPE
-          - Exported and unpacked the unmanaged solution from Dev.
+          - Exported managed and unmanaged packages from Dev.
+          - Updated the repository's unpacked solution source.
 
           ## Validation
-          The required Validate Power Platform Solution check must pass before merging.
-
-          Please review the exported changes before merging.")
+          Review the changes and ensure required validation checks pass before merging.")
 
           echo "Pull request created: $PR_URL"
+
+      - name: Upload exported packages for troubleshooting
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.SOLUTION_NAME }}-dev-exports-${{ github.run_id }}
+          path: out/*.zip
+          if-no-files-found: ignore
+          retention-days: 7
