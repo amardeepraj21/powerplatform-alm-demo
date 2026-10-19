@@ -1,0 +1,11 @@
+<dvtablesearch dvtablesearchid="95c38a98-4bca-f111-a05a-6045bdcdf663">
+  <appmoduleuniquename>ald_EmployeeManagementApp</appmoduleuniquename>
+  <iscustomizable>1</iscustomizable>
+  <m365appmoduleid>
+    <uniquename>ald_EmployeeManagementApp</uniquename>
+  </m365appmoduleid>
+  <name>M365_Primary_model_ald_EmployeeManagementApp</name>
+  <searchtype>0</searchtype>
+  <statecode>1</statecode>
+  <statuscode>2</statuscode>
+</dvtablesearch>
