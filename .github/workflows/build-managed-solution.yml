@@ -1,3 +1,4 @@
+
 name: Build Managed Solution
 
 on:
@@ -22,11 +23,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Checkout the source merged into main
+      # 1. Checkout the reviewed source merged into main
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 2. Validate required configuration and source files
+      # 2. Validate configuration and solution source
       - name: Validate solution source
         shell: bash
         run: |
@@ -40,42 +41,23 @@ jobs:
           SOLUTION_FOLDER="solutions/$SOLUTION_NAME"
 
           if [ ! -d "$SOLUTION_FOLDER" ]; then
-            echo "::error::Solution source folder not found: $SOLUTION_FOLDER"
+            echo "::error::Solution folder not found: $SOLUTION_FOLDER"
             exit 1
           fi
 
           if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
-            echo "::error::Solution.xml not found at $SOLUTION_FOLDER/Other/Solution.xml"
-            echo "Ensure the solution has been exported and unpacked into source control."
+            echo "::error::Solution.xml not found in $SOLUTION_FOLDER/Other/"
+            echo "Make sure the unmanaged solution has been unpacked into source control."
             exit 1
           fi
 
-          echo "Solution source validated: $SOLUTION_FOLDER"
+          echo "Validated solution source: $SOLUTION_FOLDER"
 
-      # 3. Install Power Platform tools
+      # 3. Install Microsoft Power Platform tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 4. Set up .NET for PAC CLI
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "10.0.x"
-
-      # 5. Install PAC CLI
-      - name: Install PAC CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet tool update --global Microsoft.PowerApps.CLI.Tool \
-            || dotnet tool install --global Microsoft.PowerApps.CLI.Tool
-
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-
-          "$HOME/.dotnet/tools/pac" help
-
-      # 6. Pack the GitHub source as a managed solution
+      # 4. Pack the committed source as a managed solution
       - name: Pack managed solution
         uses: microsoft/powerplatform-actions/pack-solution@v1
         with:
@@ -84,7 +66,7 @@ jobs:
           solution-type: Managed
           overwrite-files: true
 
-      # 7. Verify the managed ZIP was created
+      # 5. Verify the generated managed package
       - name: Verify managed solution package
         shell: bash
         run: |
@@ -92,20 +74,15 @@ jobs:
 
           PACKAGE="artifacts/${SOLUTION_NAME}_managed.zip"
 
-          if [ ! -f "$PACKAGE" ]; then
-            echo "::error::Managed solution package was not created: $PACKAGE"
+          if [ ! -f "$PACKAGE" ] || [ ! -s "$PACKAGE" ]; then
+            echo "::error::Managed solution ZIP was not created or is empty: $PACKAGE"
             exit 1
           fi
 
-          if [ ! -s "$PACKAGE" ]; then
-            echo "::error::Managed solution package is empty: $PACKAGE"
-            exit 1
-          fi
-
-          echo "Managed solution package created successfully."
+          echo "Managed package created successfully:"
           ls -lh "$PACKAGE"
 
-      # 8. Upload the package for QA and Production deployment workflows
+      # 6. Upload the artifact for downstream deployment workflows
       - name: Upload managed solution artifact
         uses: actions/upload-artifact@v6
         with:
