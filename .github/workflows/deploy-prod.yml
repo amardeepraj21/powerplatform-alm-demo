@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: 'Build run ID of the managed ZIP that passed QA testing'
-        required: true
+        description: 'Optional: Enter a specific successful Build Managed Solution run ID. Leave blank to auto-select the latest successful build from main.'
+        required: false
         type: string
 
 permissions:
@@ -18,168 +18,249 @@ env:
   SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
 
 jobs:
+  # Job 1: Find and validate the build before Production approval.
+  resolve-build:
+    name: Find Build to Deploy
+    runs-on: ubuntu-latest
+
+    outputs:
+      build_run_id: ${{ steps.resolve.outputs.build_run_id }}
+
+    steps:
+      - name: Validate repository configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SOLUTION_NAME:-}" ]]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            exit 1
+          fi
+
+          if [[ -z "${{ secrets.PP_APP_ID }}" ||
+                -z "${{ secrets.PP_TENANT_ID }}" ||
+                -z "${{ secrets.PP_CLIENT_SECRET }}" ||
+                -z "${{ secrets.PROD_ENVIRONMENT_URL }}" ]]; then
+            echo "::error::One or more required Power Platform secrets are missing."
+            exit 1
+          fi
+
+      - name: Resolve Build Run ID
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$REQUESTED_BUILD_RUN_ID" ]]; then
+            if [[ ! "$REQUESTED_BUILD_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "::error::Build Run ID must contain only numbers."
+              exit 1
+            fi
+
+            BUILD_RUN_ID="$REQUESTED_BUILD_RUN_ID"
+            echo "Using the manually specified Build Run ID: $BUILD_RUN_ID"
+          else
+            echo "Finding the latest successful Build Managed Solution run on main..."
+
+            BUILD_RUN_ID=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "build-managed-solution.yml" \
+              --branch main \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId // empty')
+
+            if [[ -z "$BUILD_RUN_ID" ]]; then
+              echo "::error::No successful Build Managed Solution run was found on main."
+              exit 1
+            fi
+
+            echo "Automatically selected Build Run ID: $BUILD_RUN_ID"
+          fi
+
+          # Validate the selected run.
+          RUN_DETAILS=$(gh run view "$BUILD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,workflowName,status,conclusion,headBranch,headSha,url)
+
+          echo "$RUN_DETAILS"
+
+          WORKFLOW_NAME=$(echo "$RUN_DETAILS" | jq -r '.workflowName')
+          RUN_STATUS=$(echo "$RUN_DETAILS" | jq -r '.status')
+          RUN_CONCLUSION=$(echo "$RUN_DETAILS" | jq -r '.conclusion')
+          RUN_BRANCH=$(echo "$RUN_DETAILS" | jq -r '.headBranch')
+          RUN_URL=$(echo "$RUN_DETAILS" | jq -r '.url')
+          RUN_SHA=$(echo "$RUN_DETAILS" | jq -r '.headSha')
+
+          if [[ "$WORKFLOW_NAME" != "Build Managed Solution" ]]; then
+            echo "::error::Selected run is not the Build Managed Solution workflow."
+            exit 1
+          fi
+
+          if [[ "$RUN_STATUS" != "completed" ||
+                "$RUN_CONCLUSION" != "success" ||
+                "$RUN_BRANCH" != "main" ]]; then
+            echo "::error::The selected build must be completed successfully on main."
+            exit 1
+          fi
+
+          # Confirm that the expected artifact exists and has not expired.
+          ARTIFACTS=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts")
+
+          ARTIFACT_COUNT=$(echo "$ARTIFACTS" | jq \
+            --arg name "managed-solution" \
+            '[.artifacts[] | select(.name == $name and .expired == false)] | length')
+
+          if [[ "$ARTIFACT_COUNT" -lt 1 ]]; then
+            echo "::error::The selected build does not contain an available managed-solution artifact."
+            exit 1
+          fi
+
+          echo "build_run_id=$BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Production Deployment - Build Review"
+            echo ""
+            echo "- **Solution:** $SOLUTION_NAME"
+            echo "- **Build Run ID:** $BUILD_RUN_ID"
+            echo "- **Source branch:** $RUN_BRANCH"
+            echo "- **Commit:** \`$RUN_SHA\`"
+            echo "- **Build status:** $RUN_CONCLUSION"
+            echo "- **Artifact:** managed-solution"
+            echo "- **Build run:** $RUN_URL"
+            echo ""
+            echo "Review this build before approving the Production deployment."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Job 2: GitHub pauses here for Production environment approval.
   deploy-prod:
     name: Deploy Managed Solution to Production
-    runs-on: ubuntu-24.04
+    runs-on: windows-latest
+    needs: resolve-build
 
-    # Wait for approval configured in GitHub Settings > Environments > Production.
-    environment:
-      name: Production
-      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    environment: Production
 
-    # Prevent concurrent Production deployments.
     concurrency:
       group: production-deployment
       cancel-in-progress: false
 
     steps:
-      # 1. Checkout repository
+      - name: Display selected build
+        shell: bash
+        env:
+          BUILD_RUN_ID: ${{ needs.resolve-build.outputs.build_run_id }}
+        run: |
+          echo "Deploying Build Run ID: $BUILD_RUN_ID"
+          echo "Artifact: managed-solution"
+
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      # 2. Validate configuration and deployment settings
-      - name: Validate configuration
-        shell: bash
-        env:
-          PROD_URL: ${{ secrets.PROD_ENVIRONMENT_URL }}
-          APP_ID: ${{ secrets.PP_APP_ID }}
-          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      - name: Validate Production configuration
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
 
-          if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is missing."
-            exit 1
-          fi
+          if ([string]::IsNullOrWhiteSpace($env:SOLUTION_NAME)) {
+            throw "Repository variable PP_SOLUTION_NAME is not configured."
+          }
 
-          if [[ ! "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::Enter a valid numeric build run ID."
-            exit 1
-          fi
+          $settingsFile = "deployment-settings/prod.json"
 
-          if [ -z "$PROD_URL" ] || [ -z "$APP_ID" ] || \
-             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::error::One or more required GitHub secrets are missing."
-            exit 1
-          fi
+          if (!(Test-Path $settingsFile)) {
+            throw "Production deployment settings not found: $settingsFile"
+          }
 
-          if [ ! -f deployment-settings/prod.json ]; then
-            echo "::error::deployment-settings/prod.json not found."
-            exit 1
-          fi
+          $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
 
-          python -m json.tool deployment-settings/prod.json > /dev/null
+          if ($null -eq $settings) {
+            throw "Production deployment settings are empty or invalid."
+          }
 
-          echo "Configuration validation passed."
-          echo "Solution: $SOLUTION_NAME"
-          echo "Expected artifact: $ARTIFACT_NAME"
+          Write-Host "Production deployment configuration validated."
 
-      # 3. Verify that the selected run is the successful build on main
-      - name: Verify selected build run
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-        run: |
-          set -euo pipefail
-
-          RUN_INFO=$(gh run view "$BUILD_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json workflowName,conclusion,headBranch,status)
-
-          WORKFLOW_NAME=$(echo "$RUN_INFO" | jq -r '.workflowName')
-          CONCLUSION=$(echo "$RUN_INFO" | jq -r '.conclusion')
-          BRANCH=$(echo "$RUN_INFO" | jq -r '.headBranch')
-          STATUS=$(echo "$RUN_INFO" | jq -r '.status')
-
-          if [ "$WORKFLOW_NAME" != "Build Managed Solution" ]; then
-            echo "::error::The selected run is not the Build Managed Solution workflow."
-            exit 1
-          fi
-
-          if [ "$STATUS" != "completed" ] || \
-             [ "$CONCLUSION" != "success" ] || \
-             [ "$BRANCH" != "main" ]; then
-            echo "::error::The selected build must be completed successfully on main."
-            echo "Status: $STATUS"
-            echo "Conclusion: $CONCLUSION"
-            echo "Branch: $BRANCH"
-            exit 1
-          fi
-
-          echo "Verified successful managed-solution build: $BUILD_RUN_ID"
-
-      # 4. Verify the expected artifact exists and has not expired
-      - name: Verify managed artifact exists
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-        run: |
-          set -euo pipefail
-
-          ARTIFACT_INFO=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts" \
-            --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\" and .expired == false) | {name: .name, expired: .expired, size_in_bytes: .size_in_bytes}" \
-            | head -n 1 || true)
-
-          if [ -z "$ARTIFACT_INFO" ]; then
-            echo "::error::Artifact '$ARTIFACT_NAME' was not found or has expired."
-            echo "Build run: $BUILD_RUN_ID"
-            echo "Check the Artifacts section of that build run."
-            exit 1
-          fi
-
-          echo "$ARTIFACT_INFO"
-          echo "Managed artifact is available."
-
-      # 5. Download the artifact from the exact build run
-      - name: Download the exact managed artifact
+      - name: Download selected managed solution artifact
         uses: actions/download-artifact@v8
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: managed-solution
           path: out
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.build_run_id }}
+          run-id: ${{ needs.resolve-build.outputs.build_run_id }}
           github-token: ${{ github.token }}
 
-      # 6. Verify managed solution ZIP integrity
-      - name: Verify managed solution ZIP
-        shell: bash
+      - name: Verify downloaded solution ZIP
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
 
-          PACKAGE="$SOLUTION_ZIP"
+          $zipPath = $env:SOLUTION_ZIP
 
-          if [ ! -s "$PACKAGE" ]; then
-            echo "::error::Managed solution ZIP not found: $PACKAGE"
-            echo "Files downloaded:"
-            find out -maxdepth 2 -type f -print || true
-            exit 1
-          fi
+          if (!(Test-Path $zipPath)) {
+            throw "Expected managed solution ZIP not found: $zipPath"
+          }
 
-          echo "Checking ZIP integrity..."
-          unzip -t "$PACKAGE"
+          $file = Get-Item $zipPath
 
-          echo "Managed solution ZIP verified:"
-          ls -lh "$PACKAGE"
+          if ($file.Length -le 0) {
+            throw "Managed solution ZIP is empty."
+          }
 
-      # 7. Install Power Platform tools
-      - name: Install Power Platform tools
-        uses: microsoft/powerplatform-actions/actions-install@v1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-      # 8. Verify Production environment connection
-      - name: Verify Production environment connection
-        uses: microsoft/powerplatform-actions/who-am-i@v1
-        with:
-          environment-url: ${{ secrets.PROD_ENVIRONMENT_URL }}
-          app-id: ${{ secrets.PP_APP_ID }}
-          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.PP_TENANT_ID }}
+          $archive = [System.IO.Compression.ZipFile]::OpenRead(
+            (Resolve-Path $zipPath).Path
+          )
 
-      # 9. Import managed solution into Production
+          try {
+            if ($archive.Entries.Count -eq 0) {
+              throw "Managed solution ZIP contains no files."
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          Write-Host "Managed solution ZIP verified."
+          Write-Host "File: $zipPath"
+          Write-Host "Size: $($file.Length) bytes"
+
+      - name: Install Power Platform CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          "PATH=$env:PATH" >> $env:GITHUB_ENV
+
+          pac --version
+
+      - name: Authenticate to Production
+        shell: pwsh
+        env:
+          PP_APP_ID: ${{ secrets.PP_APP_ID }}
+          PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+          PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+          PROD_ENVIRONMENT_URL: ${{ secrets.PROD_ENVIRONMENT_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          pac auth create `
+            --name Production `
+            --applicationId $env:PP_APP_ID `
+            --clientSecret $env:PP_CLIENT_SECRET `
+            --tenant $env:PP_TENANT_ID `
+            --environment $env:PROD_ENVIRONMENT_URL
+
+          pac auth select --name Production
+          pac org who
+
       - name: Import managed solution into Production
         uses: microsoft/powerplatform-actions/import-solution@v1
         with:
@@ -188,8 +269,24 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
           solution-file: ${{ env.SOLUTION_ZIP }}
-          use-deployment-settings-file: true
           deployment-settings-file: deployment-settings/prod.json
           publish-changes: true
-          run-asynchronously: true
+          async: true
           max-async-wait-time: 60
+
+      - name: Deployment summary
+        if: success()
+        shell: bash
+        env:
+          BUILD_RUN_ID: ${{ needs.resolve-build.outputs.build_run_id }}
+        run: |
+          {
+            echo "## Production Deployment Successful"
+            echo ""
+            echo "- **Solution:** $SOLUTION_NAME"
+            echo "- **Build Run ID:** $BUILD_RUN_ID"
+            echo "- **Artifact:** managed-solution"
+            echo "- **Environment:** Production"
+            echo ""
+            echo "The managed solution was deployed from the selected build artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
