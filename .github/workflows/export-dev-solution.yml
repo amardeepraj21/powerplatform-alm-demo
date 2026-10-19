@@ -1,4 +1,3 @@
-
 name: Export Dev Solution
 
 on:
@@ -50,7 +49,7 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      # 4. Install PAC CLI
+      # 4. Install standalone PAC CLI
       - name: Install PAC CLI
         shell: bash
         run: |
@@ -63,7 +62,7 @@ jobs:
 
           "$HOME/.dotnet/tools/pac" help
 
-      # 5. Verify Dev connection
+      # 5. Verify service principal access to Dev
       - name: Verify Dev connection
         uses: microsoft/powerplatform-actions/who-am-i@v1
         with:
@@ -92,8 +91,7 @@ jobs:
 
           pac auth select --name "Dev-SP"
 
-      # 7. Read the current version and calculate the requested version.
-      # This step does not change the version in Dev.
+      # 7. Read current version and calculate requested version
       - name: Calculate solution version
         id: version
         shell: bash
@@ -120,8 +118,13 @@ jobs:
             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' |
             head -n 1 || true)
 
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "::error::Could not determine the current solution version."
+            exit 1
+          fi
+
           if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not determine a valid current solution version."
+            echo "::error::Invalid current solution version: $CURRENT_VERSION"
             exit 1
           fi
 
@@ -150,7 +153,7 @@ jobs:
 
             custom)
               if [[ ! "$CUSTOM_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-                echo "::error::Enter a valid four-part version, such as 2.3.0.0."
+                echo "::error::Provide a valid four-part custom version, for example 2.3.0.0."
                 exit 1
               fi
 
@@ -163,6 +166,8 @@ jobs:
               ;;
           esac
 
+          # Validate the version components against the supported
+          # unsigned 16-bit version component range.
           IFS='.' read -r V1 V2 V3 V4 <<< "$NEW_VERSION"
 
           for PART in "$V1" "$V2" "$V3" "$V4"; do
@@ -172,78 +177,21 @@ jobs:
             fi
           done
 
+          # Prevent accidental reuse of the existing version.
           if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
-            echo "::error::New version must differ from the current version."
+            echo "::error::The new version is the same as the current version."
             exit 1
           fi
 
           echo "Current version: $CURRENT_VERSION"
-          echo "Selected version type: $VERSION_TYPE"
-          echo "Requested new version: $NEW_VERSION"
+          echo "Version selection: $VERSION_TYPE"
+          echo "New version: $NEW_VERSION"
 
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      # 8. Export the current Dev solution for comparison.
-      # The online version has not been changed at this point.
-      - name: Export current solution for comparison
-        uses: microsoft/powerplatform-actions/export-solution@v1
-        with:
-          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          app-id: ${{ secrets.PP_APP_ID }}
-          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-name: ${{ env.SOLUTION_NAME }}
-          solution-output-file: out/preflight-solution.zip
-          managed: false
-          overwrite: true
-          run-asynchronously: true
-          max-async-wait-time: 60
-
-      # 9. Unpack the comparison export into a temporary folder.
-      - name: Unpack comparison solution
-        uses: microsoft/powerplatform-actions/unpack-solution@v1
-        with:
-          solution-file: out/preflight-solution.zip
-          solution-folder: out/preflight/${{ env.SOLUTION_NAME }}
-          solution-type: Unmanaged
-          overwrite-files: true
-
-      # 10. Compare solution files against main.
-      # Only solution source differences should trigger the version update and PR.
-      - name: Detect solution changes
-        id: changes
-        shell: bash
-        env:
-          SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
-        run: |
-          set -euo pipefail
-
-          REPO_FOLDER="solutions/$SOLUTION_NAME"
-          EXPORTED_FOLDER="out/preflight/$SOLUTION_NAME"
-
-          if [ ! -d "$REPO_FOLDER" ]; then
-            echo "::error::Repository solution folder not found: $REPO_FOLDER"
-            exit 1
-          fi
-
-          if [ ! -d "$EXPORTED_FOLDER" ]; then
-            echo "::error::Exported solution folder not found: $EXPORTED_FOLDER"
-            exit 1
-          fi
-
-          if diff -qr "$REPO_FOLDER" "$EXPORTED_FOLDER" \
-              --exclude='*.log'; then
-            echo "No solution source changes detected."
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Solution source changes detected."
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # 11. Update Dev version only when solution source has changed.
+      # 8. Update online solution version in Dev
       - name: Update solution version in Dev
-        if: steps.changes.outputs.has_changes == 'true'
         shell: bash
         env:
           DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
@@ -259,9 +207,8 @@ jobs:
 
           echo "Updated $SOLUTION_NAME to version $NEW_VERSION"
 
-      # 12. Export the final solution with the selected version.
-      - name: Export final unmanaged solution
-        if: steps.changes.outputs.has_changes == 'true'
+      # 9. Export unmanaged solution
+      - name: Export unmanaged solution
         uses: microsoft/powerplatform-actions/export-solution@v1
         with:
           environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
@@ -269,27 +216,23 @@ jobs:
           client-secret: ${{ secrets.PP_CLIENT_SECRET }}
           tenant-id: ${{ secrets.PP_TENANT_ID }}
           solution-name: ${{ env.SOLUTION_NAME }}
-          solution-output-file: out/${{ env.SOLUTION_NAME }}.zip
+          solution-output-file: ${{ env.SOLUTION_NAME }}.zip
           managed: false
           overwrite: true
           run-asynchronously: true
           max-async-wait-time: 60
 
-      # 13. Unpack the final export into the repository solution folder.
-      - name: Unpack final solution
-        if: steps.changes.outputs.has_changes == 'true'
+      # 10. Unpack solution into source-control-friendly files
+      - name: Unpack solution
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
-          solution-file: out/${{ env.SOLUTION_NAME }}.zip
+          solution-file: ${{ env.SOLUTION_NAME }}.zip
           solution-folder: solutions/${{ env.SOLUTION_NAME }}
           solution-type: Unmanaged
           overwrite-files: true
 
-      # 14. Create or update the export PR.
-      # A stable branch name allows subsequent exports to update the
-      # existing PR instead of creating a new PR for every run.
-      - name: Push export branch and create or update pull request
-        if: steps.changes.outputs.has_changes == 'true'
+      # 11. Commit changes to a branch and create a PR
+      - name: Push export branch and create pull request
         shell: bash
         env:
           SOLUTION_NAME: ${{ env.SOLUTION_NAME }}
@@ -301,68 +244,46 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "$SOLUTION_NAME" ]; then
+            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            exit 1
+          fi
+
           if [ -z "$ALM_GITHUB_TOKEN" ]; then
             echo "::error::Repository secret ALM_GITHUB_TOKEN is not configured."
             exit 1
           fi
 
-          REPO_FOLDER="solutions/$SOLUTION_NAME"
-          BRANCH_NAME="automation/export-dev-$SOLUTION_NAME"
-
-          # Preserve the exported snapshot before switching branches.
-          EXPORT_SNAPSHOT="$RUNNER_TEMP/exported-solution"
-          mkdir -p "$EXPORT_SNAPSHOT"
-          rsync -a --delete "$REPO_FOLDER/" "$EXPORT_SNAPSHOT/"
-
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Fetch the latest main branch and reset the automation branch
-          # to main so the PR contains only the current exported solution.
-          git fetch origin main
-
-          git checkout -B "$BRANCH_NAME" origin/main
-
-          # Apply the exported snapshot, including deletions.
-          mkdir -p "$REPO_FOLDER"
-          rsync -a --delete "$EXPORT_SNAPSHOT/" "$REPO_FOLDER/"
-
-          git add "$REPO_FOLDER"
+          git add "solutions/$SOLUTION_NAME"
 
           if git diff --cached --quiet; then
-            echo "The export matches main. No PR update is needed."
-            exit 0
+            echo "::error::No solution source changes detected. No pull request was created."
+            echo "The Dev version may already have been updated to $NEW_VERSION."
+            exit 1
           fi
 
+          BRANCH_NAME="automation/export-dev-${GITHUB_RUN_ID}"
+
+          git checkout -b "$BRANCH_NAME"
           git commit -m "Export $SOLUTION_NAME from Dev ($NEW_VERSION)"
 
-          # Use the fine-grained PAT for the branch push.
+          # Authenticate Git pushes with the fine-grained PAT.
           git remote set-url origin \
             "https://x-access-token:${ALM_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          # This branch is automation-managed. It is intentionally
-          # refreshed from main on each export.
-          git push --force origin "$BRANCH_NAME"
+          git push --set-upstream origin "$BRANCH_NAME"
 
-          # Reuse an existing open PR when one already targets main.
-          EXISTING_PR=$(gh pr list \
+          # Create a PR targeting main.
+          PR_URL=$(gh pr create \
             --repo "$GITHUB_REPOSITORY" \
-            --head "$BRANCH_NAME" \
             --base main \
-            --state open \
-            --json url \
-            --jq '.[0].url // empty')
-
-          if [ -n "$EXISTING_PR" ]; then
-            echo "Updated existing export PR: $EXISTING_PR"
-          else
-            PR_URL=$(gh pr create \
-              --repo "$GITHUB_REPOSITORY" \
-              --base main \
-              --head "$BRANCH_NAME" \
-              --title "Export $SOLUTION_NAME from Dev - v$NEW_VERSION" \
-              --body "## Summary
+            --head "$BRANCH_NAME" \
+            --title "Export $SOLUTION_NAME from Dev - v$NEW_VERSION" \
+            --body "## Summary
           - Solution: $SOLUTION_NAME
           - Previous version: $CURRENT_VERSION
           - New version: $NEW_VERSION
@@ -374,14 +295,4 @@ jobs:
 
           Please review the exported changes before merging.")
 
-            echo "Created export PR: $PR_URL"
-          fi
-
-      # 15. Clear status when no solution source changes were found.
-      - name: Report no solution changes
-        if: steps.changes.outputs.has_changes == 'false'
-        shell: bash
-        run: |
-          echo "No solution source changes were detected."
-          echo "Dev solution version was not incremented."
-          echo "No export branch or pull request was created."
+          echo "Pull request created: $PR_URL"
