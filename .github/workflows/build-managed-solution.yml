@@ -1,39 +1,34 @@
-
 name: Build Managed Solution
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
     paths:
-      - 'solutions/**'
-      - '.github/workflows/build-managed-solution.yml'
+      - "solutions/**"
+      - ".github/workflows/build-managed-solution.yml"
+
+  workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
 
 env:
   SOLUTION_NAME: ${{ vars.PP_SOLUTION_NAME }}
-  SOLUTION_ZIP: out/${{ vars.PP_SOLUTION_NAME }}_managed.zip
 
 jobs:
-  build-managed:
-    name: Export Managed Solution
+  build-managed-solution:
+    name: Build Managed Solution
     runs-on: ubuntu-24.04
 
     steps:
+      # 1. Checkout the source merged into main
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Validate configuration
+      # 2. Validate required configuration and source files
+      - name: Validate solution source
         shell: bash
-        env:
-          DEV_URL: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          APP_ID: ${{ secrets.PP_APP_ID }}
-          TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
         run: |
           set -euo pipefail
 
@@ -42,51 +37,79 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$DEV_URL" ] || [ -z "$APP_ID" ] || \
-             [ -z "$TENANT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::error::One or more required GitHub secrets are missing."
+          SOLUTION_FOLDER="solutions/$SOLUTION_NAME"
+
+          if [ ! -d "$SOLUTION_FOLDER" ]; then
+            echo "::error::Solution source folder not found: $SOLUTION_FOLDER"
             exit 1
           fi
 
-          echo "Solution: $SOLUTION_NAME"
-          echo "Source environment: Dev"
+          if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
+            echo "::error::Solution.xml not found at $SOLUTION_FOLDER/Other/Solution.xml"
+            echo "Ensure the solution has been exported and unpacked into source control."
+            exit 1
+          fi
 
+          echo "Solution source validated: $SOLUTION_FOLDER"
+
+      # 3. Install Power Platform tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      - name: Create output directory
-        shell: bash
-        run: mkdir -p out
-
-      - name: Export managed solution from Dev
-        uses: microsoft/powerplatform-actions/export-solution@v1
+      # 4. Set up .NET for PAC CLI
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
         with:
-          environment-url: ${{ secrets.DEV_ENVIRONMENT_URL }}
-          app-id: ${{ secrets.PP_APP_ID }}
-          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.PP_TENANT_ID }}
-          solution-name: ${{ env.SOLUTION_NAME }}
-          solution-output-file: ${{ env.SOLUTION_ZIP }}
-          managed: true
-          overwrite: true
+          dotnet-version: "10.0.x"
 
-      - name: Verify managed solution ZIP
+      # 5. Install PAC CLI
+      - name: Install PAC CLI
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -s "$SOLUTION_ZIP" ]; then
-            echo "::error::Managed solution ZIP was not created."
+          dotnet tool update --global Microsoft.PowerApps.CLI.Tool \
+            || dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+          "$HOME/.dotnet/tools/pac" help
+
+      # 6. Pack the GitHub source as a managed solution
+      - name: Pack managed solution
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: solutions/${{ env.SOLUTION_NAME }}
+          solution-file: artifacts/${{ env.SOLUTION_NAME }}_managed.zip
+          solution-type: Managed
+          overwrite-files: true
+
+      # 7. Verify the managed ZIP was created
+      - name: Verify managed solution package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE="artifacts/${SOLUTION_NAME}_managed.zip"
+
+          if [ ! -f "$PACKAGE" ]; then
+            echo "::error::Managed solution package was not created: $PACKAGE"
             exit 1
           fi
 
-          unzip -t "$SOLUTION_ZIP"
-          echo "Managed solution ZIP verified successfully."
+          if [ ! -s "$PACKAGE" ]; then
+            echo "::error::Managed solution package is empty: $PACKAGE"
+            exit 1
+          fi
 
+          echo "Managed solution package created successfully."
+          ls -lh "$PACKAGE"
+
+      # 8. Upload the package for QA and Production deployment workflows
       - name: Upload managed solution artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.SOLUTION_NAME }}-managed
-          path: ${{ env.SOLUTION_ZIP }}
+          name: managed-solution
+          path: artifacts/${{ env.SOLUTION_NAME }}_managed.zip
           if-no-files-found: error
           retention-days: 30
