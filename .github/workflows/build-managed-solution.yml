@@ -23,50 +23,55 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1. Checkout the reviewed source merged into main
+      # 1. Checkout the merged solution source
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 2. Validate configuration and solution source
+      # 2. Validate the dual-format solution source
       - name: Validate solution source
         shell: bash
         run: |
           set -euo pipefail
 
           if [ -z "$SOLUTION_NAME" ]; then
-            echo "::error::Repository variable PP_SOLUTION_NAME is not configured."
+            echo "::error::PP_SOLUTION_NAME is not configured."
             exit 1
           fi
 
           SOLUTION_FOLDER="solutions/$SOLUTION_NAME"
 
-          if [ ! -d "$SOLUTION_FOLDER" ]; then
-            echo "::error::Solution folder not found: $SOLUTION_FOLDER"
-            exit 1
-          fi
-
           if [ ! -f "$SOLUTION_FOLDER/Other/Solution.xml" ]; then
             echo "::error::Solution.xml not found in $SOLUTION_FOLDER/Other/"
-            echo "Make sure the unmanaged solution has been unpacked into source control."
             exit 1
           fi
 
-          echo "Validated solution source: $SOLUTION_FOLDER"
+          if ! grep -q '<Managed>0</Managed>' \
+            "$SOLUTION_FOLDER/Other/Solution.xml"; then
+            echo "::error::Expected unmanaged solution metadata was not found."
+            echo "Check that the source was unpacked correctly."
+            exit 1
+          fi
 
-      # 3. Install Microsoft Power Platform tools
+          echo "Solution source validation passed."
+
+      # 3. Install Power Platform tools
       - name: Install Power Platform tools
         uses: microsoft/powerplatform-actions/actions-install@v1
 
-      # 4. Pack the committed source as a managed solution
+      # 4. Create the artifact directory
+      - name: Create artifact directory
+        shell: bash
+        run: mkdir -p artifacts
+
+      # 5. Pack the dual-format source as Managed
       - name: Pack managed solution
         uses: microsoft/powerplatform-actions/pack-solution@v1
         with:
           solution-folder: solutions/${{ env.SOLUTION_NAME }}
           solution-file: artifacts/${{ env.SOLUTION_NAME }}_managed.zip
           solution-type: Managed
-          overwrite-files: true
 
-      # 5. Verify the generated managed package
+      # 6. Verify the managed package
       - name: Verify managed solution package
         shell: bash
         run: |
@@ -74,15 +79,17 @@ jobs:
 
           PACKAGE="artifacts/${SOLUTION_NAME}_managed.zip"
 
-          if [ ! -f "$PACKAGE" ] || [ ! -s "$PACKAGE" ]; then
-            echo "::error::Managed solution ZIP was not created or is empty: $PACKAGE"
+          if [ ! -s "$PACKAGE" ]; then
+            echo "::error::Managed package was not created or is empty."
             exit 1
           fi
 
-          echo "Managed package created successfully:"
+          unzip -t "$PACKAGE"
+
+          echo "Managed package created successfully."
           ls -lh "$PACKAGE"
 
-      # 6. Upload the artifact for downstream deployment workflows
+      # 7. Upload the artifact for QA and Production
       - name: Upload managed solution artifact
         uses: actions/upload-artifact@v6
         with:
